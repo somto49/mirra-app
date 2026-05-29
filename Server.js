@@ -3,9 +3,9 @@ import path from "path";
 import fs from "fs";
 
 const app = express();
-// Point to the dist folder created by your frontend build
-// If your build puts it in a 'client/dist' folder, change this to 'client/dist'
-const distPath = path.resolve(process.cwd(), "dist"); 
+// This looks for 'dist' at the actual project root, 
+// avoiding the 'src/src' nesting issue.
+const distPath = path.resolve(process.cwd(), "dist");
 
 console.log("Looking for static files at:", distPath);
 
@@ -14,6 +14,6 @@ if (fs.existsSync(distPath)) {
   app.get("*", (req, res) => {
     res.sendFile(path.join(distPath, "index.html"));
   });
+} else {
+  console.error("CRITICAL: 'dist' folder not found at:", distPath);
 }
-
-// ... your API routes remain here ...
