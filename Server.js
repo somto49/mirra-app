@@ -12,8 +12,8 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// Serve the static React frontend files (if compiled)
-app.use(express.static(path.join(__dirname, "dist")));
+// Serve the static React frontend files (looking up one level to the root)
+app.use(express.static(path.join(__dirname, "..", "dist")));
 
 // ── SECURE ROUTE FOR GEMINI ANALYSIS ──────────────────────────────────────────
 app.post("/api/analyze", async (req, res) => {
@@ -101,9 +101,9 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// Always route back to React index if no API routes match
+// Always route back to React index if no API routes match (looking up one level)
 app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "dist", "index.html"));
+  res.sendFile(path.join(__dirname, "..", "dist", "index.html"));
 });
 
 app.listen(PORT, () => {
