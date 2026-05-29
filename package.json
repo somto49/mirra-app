@@ -1,13 +1,4 @@
-{
-  "name": "mirra-app",
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "build": "cd client && npm install && npm run build && cp -r client/dist ./dist",
+"scripts": {
+    "build": "npm run build",
     "start": "node src/server.js"
-  },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.19.2"
   }
-}
