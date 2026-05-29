@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
 // Serve the static React frontend files
-// The "../" tells the server to look in the root folder, not inside src
+// Using "../dist" correctly exits the src/ folder to find the root dist/ folder
 app.use(express.static(path.join(__dirname, "../dist")));
 
 // ── SECURE ROUTE FOR GEMINI ANALYSIS ──────────────────────────────────────────
@@ -103,6 +103,7 @@ app.post("/api/generate", async (req, res) => {
 });
 
 // Always route back to React index if no API routes match
+// Using "../dist/index.html" ensures the server finds the file at the root
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "../dist/index.html"));
 });
