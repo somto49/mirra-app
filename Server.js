@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// Since Root Directory is 'src', the 'dist' folder is at the parent level
+// Using "../dist" correctly exits the src/ folder to find the root dist/ folder
 app.use(express.static(path.join(__dirname, "../dist")));
 
 // ── SECURE ROUTE FOR GEMINI ANALYSIS ──────────────────────────────────────────
