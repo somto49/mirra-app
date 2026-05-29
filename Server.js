@@ -12,9 +12,9 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// Serve the static React frontend files
-// The "../dist" tells the server to go up one level from 'src' to find the 'dist' folder
-app.use(express.static(path.join(__dirname, "../dist")));
+// 1. Use absolute paths based on the project root (process.cwd())
+const rootDir = process.cwd();
+app.use(express.static(path.join(rootDir, 'dist')));
 
 // ── SECURE ROUTE FOR GEMINI ANALYSIS ──────────────────────────────────────────
 app.post("/api/analyze", async (req, res) => {
@@ -23,7 +23,7 @@ app.post("/api/analyze", async (req, res) => {
     const geminiKey = process.env.GEMINI_API_KEY;
 
     if (!geminiKey) {
-      return res.status(500).json({ error: "Gemini API key is missing on the server configuration." });
+      return res.status(500).json({ error: "Gemini API key is missing." });
     }
 
     const response = await fetch(
@@ -35,17 +35,7 @@ app.post("/api/analyze", async (req, res) => {
           contents: [{
             parts: [
               { inline_data: { mime_type: "image/jpeg", data: imageBase64 } },
-              {
-                text: `Analyze this person's appearance for AI fashion photo generation. Return ONLY a valid JSON object, no markdown, no backticks, no explanation:
-{
-  "skinTone": "very detailed skin tone description (e.g. deep ebony, rich mahogany, warm brown, golden caramel, medium brown)",
-  "bodyBuild": "body build (e.g. tall and slender, petite and curvy, athletic and toned)",
-  "gender": "woman or man",
-  "ageRange": "approximate age range (e.g. mid 20s, early 30s)",
-  "currentStyle": "one sentence about their current style",
-  "fluxPromptBase": "A [gender] with [detailed skin tone] skin, [facial features], [body type], photorealistic fashion model"
-}`
-              }
+              { text: `Analyze this person's appearance... (your existing prompt here)` }
             ]
           }],
           generationConfig: { temperature: 0.1 }
@@ -54,8 +44,6 @@ app.post("/api/analyze", async (req, res) => {
     );
 
     const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
-
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
     const clean = text.replace(/```json|```/g, "").trim();
     res.json(JSON.parse(clean));
@@ -69,30 +57,11 @@ app.post("/api/generate", async (req, res) => {
   try {
     const { prompt } = req.body;
     const hfToken = process.env.HUGGING_FACE_TOKEN;
-
-    if (!hfToken) {
-      return res.status(500).json({ error: "HuggingFace token is missing on the server configuration." });
-    }
-
-    const response = await fetch(
-      "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${hfToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          inputs: prompt,
-          parameters: { num_inference_steps: 4, width: 768, height: 1024 },
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      const err = await response.text();
-      return res.status(response.status).json({ error: `HuggingFace error: ${err.slice(0, 100)}` });
-    }
+    const response = await fetch("https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${hfToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ inputs: prompt, parameters: { num_inference_steps: 4, width: 768, height: 1024 } }),
+    });
 
     const arrayBuffer = await response.arrayBuffer();
     const base64Image = Buffer.from(arrayBuffer).toString("base64");
@@ -102,10 +71,9 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// Always route back to React index if no API routes match
-// Using "../dist/index.html" ensures it exits the src folder to find the file
+// 2. Use absolute path for the fallback route
 app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "../dist/index.html"));
+  res.sendFile(path.join(rootDir, 'dist', 'index.html'));
 });
 
 app.listen(PORT, () => {
