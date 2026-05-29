@@ -12,9 +12,8 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// 1. Use absolute paths based on the project root (process.cwd())
-const rootDir = process.cwd();
-app.use(express.static(path.join(rootDir, 'dist')));
+// Since Root Directory is 'src', the 'dist' folder is at the parent level
+app.use(express.static(path.join(__dirname, "../dist")));
 
 // ── SECURE ROUTE FOR GEMINI ANALYSIS ──────────────────────────────────────────
 app.post("/api/analyze", async (req, res) => {
@@ -23,7 +22,7 @@ app.post("/api/analyze", async (req, res) => {
     const geminiKey = process.env.GEMINI_API_KEY;
 
     if (!geminiKey) {
-      return res.status(500).json({ error: "Gemini API key is missing." });
+      return res.status(500).json({ error: "Gemini API key is missing on the server configuration." });
     }
 
     const response = await fetch(
@@ -35,7 +34,17 @@ app.post("/api/analyze", async (req, res) => {
           contents: [{
             parts: [
               { inline_data: { mime_type: "image/jpeg", data: imageBase64 } },
-              { text: `Analyze this person's appearance... (your existing prompt here)` }
+              {
+                text: `Analyze this person's appearance for AI fashion photo generation. Return ONLY a valid JSON object, no markdown, no backticks, no explanation:
+{
+  "skinTone": "very detailed skin tone description",
+  "bodyBuild": "body build",
+  "gender": "woman or man",
+  "ageRange": "approximate age range",
+  "currentStyle": "one sentence about their current style",
+  "fluxPromptBase": "A [gender] with [detailed skin tone] skin, [facial features], [body type], photorealistic fashion model"
+}`
+              }
             ]
           }],
           generationConfig: { temperature: 0.1 }
@@ -44,6 +53,8 @@ app.post("/api/analyze", async (req, res) => {
     );
 
     const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
     const clean = text.replace(/```json|```/g, "").trim();
     res.json(JSON.parse(clean));
@@ -57,11 +68,30 @@ app.post("/api/generate", async (req, res) => {
   try {
     const { prompt } = req.body;
     const hfToken = process.env.HUGGING_FACE_TOKEN;
-    const response = await fetch("https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${hfToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ inputs: prompt, parameters: { num_inference_steps: 4, width: 768, height: 1024 } }),
-    });
+
+    if (!hfToken) {
+      return res.status(500).json({ error: "HuggingFace token is missing." });
+    }
+
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${hfToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: prompt,
+          parameters: { num_inference_steps: 4, width: 768, height: 1024 },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(response.status).json({ error: `HuggingFace error: ${err.slice(0, 100)}` });
+    }
 
     const arrayBuffer = await response.arrayBuffer();
     const base64Image = Buffer.from(arrayBuffer).toString("base64");
@@ -71,9 +101,9 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// 2. Use absolute path for the fallback route
+// Always route back to React index if no API routes match
 app.get("*", (req, res) => {
-  res.sendFile(path.join(rootDir, 'dist', 'index.html'));
+  res.sendFile(path.join(__dirname, "../dist/index.html"));
 });
 
 app.listen(PORT, () => {
