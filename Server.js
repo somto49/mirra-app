@@ -13,6 +13,7 @@ app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
 // Serve the static React frontend files
+// The "../" tells the server to look in the root folder, not inside src
 app.use(express.static(path.join(__dirname, "../dist")));
 
 // ── SECURE ROUTE FOR GEMINI ANALYSIS ──────────────────────────────────────────
