@@ -1,11 +1,7 @@
 import express from "express";
 import cors from "cors";
 import path from "path";
-import { fileURLToPath } from "url";
 import fs from "fs";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -13,13 +9,13 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// ABSOLUTE PATH FIX: 
-// This resolves the 'dist' folder from the absolute root of the project, 
-// bypassing the 'src/src' nesting issue entirely.
-const rootPath = path.resolve(process.cwd()); 
+// ABSOLUTE PATH RESOLUTION
+// This forces the server to look for 'dist' at the absolute root 
+// of the project, bypassing the nested 'src/src' issue.
+const rootPath = process.cwd(); 
 const distPath = path.join(rootPath, "dist");
 
-console.log("Looking for static files at:", distPath);
+console.log("Looking for static files at (Absolute Path):", distPath);
 
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
@@ -27,16 +23,18 @@ if (fs.existsSync(distPath)) {
     res.sendFile(path.join(distPath, "index.html"));
   });
 } else {
-  console.error("CRITICAL: 'dist' folder not found at:", distPath);
+  console.error("CRITICAL ERROR: 'dist' folder NOT found at:", distPath);
+  // Serve a simple response so the server doesn't crash
+  app.get("*", (req, res) => res.send("Server is running, but 'dist' folder not found."));
 }
 
 // ── API ROUTES ──────────────────────────────────────────────────────────────
 app.post("/api/analyze", async (req, res) => {
-  // ... (Keep your existing API logic here)
+  /* ... keep your existing API logic here ... */
 });
 
 app.post("/api/generate", async (req, res) => {
-  // ... (Keep your existing API logic here)
+  /* ... keep your existing API logic here ... */
 });
 
 app.listen(PORT, () => {
