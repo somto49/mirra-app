@@ -2,11 +2,10 @@
   "name": "mirra-app",
   "version": "1.0.0",
   "type": "module",
-  "description": "AI fashion generation app",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "build": "echo 'Build process completed'"
+    "build": "cd client && npm install && npm run build",
+    "start": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
