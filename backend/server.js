@@ -2,77 +2,122 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
-
+ 
 dotenv.config();
-
+ 
 const app = express();
 const PORT = process.env.PORT || 4000;
-
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+ 
+app.use(cors({
+  origin: [
+    "https://mirra-app.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ],
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"],
+}));
+ 
 app.use(express.json({ limit: "20mb" }));
-
-app.get("/", (_req, res) => res.json({ status: "CROWN API is running ✦" }));
-
-// ── /api/analyze (Gemini Vision) ────────────────────────────────────────────
+ 
+app.get("/", (req, res) => {
+  res.json({ status: "✦ CROWN API is live" });
+});
+ 
 app.post("/api/analyze", async (req, res) => {
+  const { imageBase64 } = req.body;
+  if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
+ 
+  const GEMINI_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not set on server" });
+ 
   try {
-    const { imageBase64 } = req.body;
-    if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
-    if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not set" });
-
-    const base64 = imageBase64.replace(/^data:image\/\w+;base64,/, "");
-
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{
             parts: [
-              { text: "Describe this person's face, skin tone, and features for a portrait prompt. Be concise (1-2 sentences)." },
-              { inline_data: { mime_type: "image/jpeg", data: base64 } }
+              { inline_data: { mime_type: "image/jpeg", data: imageBase64 } },
+              {
+                text: `Analyze this person's appearance for AI fashion photo generation.
+Return ONLY a valid JSON object — no markdown, no backticks, no extra text:
+{
+  "skinTone": "detailed skin tone e.g. deep ebony, rich mahogany, warm brown, golden caramel",
+  "bodyBuild": "body build e.g. tall and slender, petite and curvy, athletic",
+  "gender": "woman or man",
+  "ageRange": "approximate age range e.g. mid 20s, early 30s",
+  "currentStyle": "one sentence about current style",
+  "fluxPromptBase": "A [gender] with [skin tone] skin, [facial features], [body type], photorealistic fashion model"
+}`
+              }
             ]
-          }]
+          }],
+          generationConfig: { temperature: 0.1 }
         })
       }
     );
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: data.error?.message || "Gemini failed" });
-    const description = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    res.json({ description });
+ 
+    const data = await response.json();
+    if (data.error) return res.status(502).json({ error: `Gemini: ${data.error.message}` });
+ 
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const clean = raw.replace(/```json|```/g, "").trim();
+ 
+    try {
+      return res.json(JSON.parse(clean));
+    } catch {
+      return res.status(502).json({ error: "Could not parse Gemini response" });
+    }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[/api/analyze]", err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
-
-// ── /api/generate (Hugging Face Flux) ───────────────────────────────────────
+ 
 app.post("/api/generate", async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) return res.status(400).json({ error: "prompt required" });
+ 
+  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
+  if (!HF_TOKEN) return res.status(500).json({ error: "HUGGINGFACE_TOKEN not set on server" });
+ 
   try {
-    const { prompt } = req.body;
-    if (!prompt) return res.status(400).json({ error: "prompt required" });
-    if (!process.env.HF_TOKEN) return res.status(500).json({ error: "HF_TOKEN not set" });
-
-    const r = await fetch(
+    const response = await fetch(
       "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.HF_TOKEN}`,
+          Authorization: `Bearer ${HF_TOKEN}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ inputs: prompt }),
+        body: JSON.stringify({
+          inputs: prompt,
+          parameters: { num_inference_steps: 4, width: 768, height: 1024 }
+        })
       }
     );
-    if (!r.ok) {
-      const errText = await r.text();
-      return res.status(r.status).json({ error: errText });
+ 
+    if (response.status === 503) {
+      return res.status(503).json({ error: "FLUX model is warming up. Wait 20 seconds and try again." });
     }
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.json({ image: `data:image/png;base64,${buf.toString("base64")}` });
+ 
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(502).json({ error: `HuggingFace ${response.status}: ${errText.slice(0, 200)}` });
+    }
+ 
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    return res.json({ image: `data:image/jpeg;base64,${base64}` });
+ 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[/api/generate]", err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
-
-app.listen(PORT, () => console.log(`✦ CROWN API on port ${PORT}`));
+ 
+app.listen(PORT, () => console.log(`✦ CROWN API running on port ${PORT}`));
+ 
