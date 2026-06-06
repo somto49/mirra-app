@@ -288,7 +288,11 @@ export default function App() {
               </div>
               <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
                 onChange={e => handleFile(e.target.files[0])} />
-              <GoldDivider />
+              <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "12px 0" }}>
+                <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, transparent, ${T.goldDim})` }} />
+                <span style={{ color: T.goldDim, fontSize: 8, letterSpacing: 4 }}>✦ ✦ ✦</span>
+                <div style={{ flex: 1, height: 1, background: `linear-gradient(to left, transparent, ${T.goldDim})` }} />
+              </div>
               <p style={{ color: T.muted, fontSize: 11 }}>Best results with a clear, well-lit front-facing photo.</p>
             </div>
           </div>
@@ -448,3 +452,41 @@ export default function App() {
                         }}>
                           <img src={h.url} style={{ width: 36, height: 46, objectFit: "cover", borderRadius: 5 }} />
                           <div>
+                            <div style={{ fontSize: 10, color: T.cream }}>{h.hair}</div>
+                            <div style={{ fontSize: 9, color: T.muted }}>{h.outfit}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+              <div style={{ padding: 18, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+                <button onClick={() => { setSelectedHair(null); setSelectedOutfit(null); setStep("configure"); }} style={{
+                  background: `linear-gradient(135deg, #8B6914, ${T.gold})`,
+                  border: "none", borderRadius: 10, padding: "13px",
+                  color: T.bg, fontSize: 10, letterSpacing: 3, cursor: "pointer",
+                  fontFamily: "inherit", fontWeight: 700, textTransform: "uppercase",
+                }}>✦ Try Another Look</button>
+                <a href={generatedImage} download="mirra-look.jpg" style={{
+                  display: "block", background: T.card, border: `1px solid ${T.border}`,
+                  borderRadius: 10, padding: "11px", color: T.cream,
+                  fontSize: 10, letterSpacing: 3, textDecoration: "none",
+                  textAlign: "center", textTransform: "uppercase",
+                }}>↓ Download</a>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: ${T.goldDim}; border-radius: 4px; }
+      `}</style>
+    </div>
+  );
+}
