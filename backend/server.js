@@ -2,12 +2,12 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
- 
+
 dotenv.config();
- 
+
 const app = express();
 const PORT = process.env.PORT || 4000;
- 
+
 app.use(cors({
   origin: [
     "https://mirra-app.vercel.app",
@@ -17,23 +17,23 @@ app.use(cors({
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"],
 }));
- 
+
 app.use(express.json({ limit: "20mb" }));
- 
+
 app.get("/", (req, res) => {
-  res.json({ status: "✦ CROWN API is live" });
+  res.json({ status: "✦ MIRRA API is live" });
 });
- 
+
 app.post("/api/analyze", async (req, res) => {
   const { imageBase64 } = req.body;
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
- 
+
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not set on server" });
- 
+
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -59,13 +59,13 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text:
         })
       }
     );
- 
+
     const data = await response.json();
     if (data.error) return res.status(502).json({ error: `Gemini: ${data.error.message}` });
- 
+
     const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
     const clean = raw.replace(/```json|```/g, "").trim();
- 
+
     try {
       return res.json(JSON.parse(clean));
     } catch {
@@ -76,14 +76,14 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text:
     return res.status(500).json({ error: err.message });
   }
 });
- 
+
 app.post("/api/generate", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
- 
+
   const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
   if (!HF_TOKEN) return res.status(500).json({ error: "HUGGINGFACE_TOKEN not set on server" });
- 
+
   try {
     const response = await fetch(
       "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
@@ -99,25 +99,24 @@ app.post("/api/generate", async (req, res) => {
         })
       }
     );
- 
+
     if (response.status === 503) {
       return res.status(503).json({ error: "FLUX model is warming up. Wait 20 seconds and try again." });
     }
- 
+
     if (!response.ok) {
       const errText = await response.text();
       return res.status(502).json({ error: `HuggingFace ${response.status}: ${errText.slice(0, 200)}` });
     }
- 
+
     const buffer = await response.arrayBuffer();
     const base64 = Buffer.from(buffer).toString("base64");
     return res.json({ image: `data:image/jpeg;base64,${base64}` });
- 
+
   } catch (err) {
     console.error("[/api/generate]", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
- 
-app.listen(PORT, () => console.log(`✦ CROWN API running on port ${PORT}`));
- 
+
+app.listen(PORT, () => console.log(`✦ MIRRA API running on port ${PORT}`));
