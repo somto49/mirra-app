@@ -24,24 +24,37 @@ app.get("/", (req, res) => {
   res.json({ status: "✦ MIRRA API is live" });
 });
 
+// ── /api/analyze — Groq photo analysis ───────────────────────────────────────
 app.post("/api/analyze", async (req, res) => {
   const { imageBase64 } = req.body;
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
 
-  const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not set on server" });
+  const GROQ_KEY = process.env.GROQ_API_KEY;
+  if (!GROQ_KEY) return res.status(500).json({ error: "GROQ_API_KEY not set on server" });
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inline_data: { mime_type: "image/jpeg", data: imageBase64 } },
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
+        temperature: 0.1,
+        max_tokens: 500,
+        messages: [
+          {
+            role: "user",
+            content: [
               {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/jpeg;base64,${imageBase64}`,
+                },
+              },
+              {
+                type: "text",
                 text: `Analyze this person's appearance for AI fashion photo generation.
 Return ONLY a valid JSON object — no markdown, no backticks, no extra text:
 {
@@ -51,25 +64,24 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text:
   "ageRange": "approximate age range e.g. mid 20s, early 30s",
   "currentStyle": "one sentence about current style",
   "fluxPromptBase": "A [gender] with [skin tone] skin, [facial features], [body type], photorealistic fashion model"
-}`
-              }
-            ]
-          }],
-          generationConfig: { temperature: 0.1 }
-        })
-      }
-    );
+}`,
+              },
+            ],
+          },
+        ],
+      }),
+    });
 
     const data = await response.json();
-    if (data.error) return res.status(502).json({ error: `Gemini: ${data.error.message}` });
+    if (data.error) return res.status(502).json({ error: `Groq: ${data.error.message}` });
 
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const raw = data.choices?.[0]?.message?.content || "{}";
     const clean = raw.replace(/```json|```/g, "").trim();
 
     try {
       return res.json(JSON.parse(clean));
     } catch {
-      return res.status(502).json({ error: "Could not parse Gemini response" });
+      return res.status(502).json({ error: "Could not parse Groq response" });
     }
   } catch (err) {
     console.error("[/api/analyze]", err.message);
@@ -77,6 +89,7 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text:
   }
 });
 
+// ── /api/generate — HuggingFace FLUX.1 image generation ──────────────────────
 app.post("/api/generate", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
