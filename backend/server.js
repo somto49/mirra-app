@@ -42,7 +42,7 @@ app.post("/api/analyze", async (req, res) => {
       body: JSON.stringify({
         model: "meta-llama/llama-4-scout-17b-16e-instruct",
         temperature: 0.1,
-        max_tokens: 500,
+        max_tokens: 800,
         messages: [
           {
             role: "user",
@@ -55,15 +55,16 @@ app.post("/api/analyze", async (req, res) => {
               },
               {
                 type: "text",
-                text: `Analyze this person's appearance for AI fashion photo generation.
-Return ONLY a valid JSON object — no markdown, no backticks, no extra text:
+                text: `You are an expert at analyzing human appearances for AI image generation. Study this person's face and body very carefully and return ONLY a valid JSON object — no markdown, no backticks, no extra text:
 {
-  "skinTone": "detailed skin tone e.g. deep ebony, rich mahogany, warm brown, golden caramel",
-  "bodyBuild": "body build e.g. tall and slender, petite and curvy, athletic",
+  "skinTone": "very precise skin tone e.g. deep ebony with cool undertones, rich dark brown with warm undertones, medium brown with golden undertones",
+  "faceShape": "face shape e.g. oval, round, square, heart, oblong",
+  "facialFeatures": "very detailed facial features e.g. broad nose, full lips, strong jawline, high cheekbones, deep-set dark brown eyes, thick eyebrows, prominent forehead",
+  "bodyBuild": "detailed body build e.g. broad shoulders, athletic muscular build, slim waist",
   "gender": "woman or man",
   "ageRange": "approximate age range e.g. mid 20s, early 30s",
-  "currentStyle": "one sentence about current style",
-  "fluxPromptBase": "A [gender] with [skin tone] skin, [facial features], [body type], photorealistic fashion model"
+  "currentStyle": "one sentence about their current style",
+  "fluxPromptBase": "A highly detailed photorealistic portrait of a [gender], [skin tone] skin with [undertones], [face shape] face shape, [detailed facial features including eyes, nose, lips, jawline], [body build], sharp facial details, hyperrealistic skin texture, professional fashion model"
 }`,
               },
             ],
@@ -98,6 +99,9 @@ app.post("/api/generate", async (req, res) => {
   if (!HF_TOKEN) return res.status(500).json({ error: "HUGGINGFACE_TOKEN not set on server" });
 
   try {
+    // Build enriched prompt with quality boosters and negative guidance
+    const enrichedPrompt = `${prompt}, highly detailed face, sharp eyes, realistic skin pores, subsurface scattering, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, masterpiece, best quality, hyperrealistic`;
+
     const response = await fetch(
       "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
       {
@@ -107,8 +111,13 @@ app.post("/api/generate", async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          inputs: prompt,
-          parameters: { num_inference_steps: 4, width: 768, height: 1024 }
+          inputs: enrichedPrompt,
+          parameters: {
+            num_inference_steps: 8,
+            width: 768,
+            height: 1024,
+            guidance_scale: 3.5,
+          }
         })
       }
     );
