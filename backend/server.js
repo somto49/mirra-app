@@ -90,53 +90,136 @@ app.post("/api/analyze", async (req, res) => {
   }
 });
 
-// ── /api/generate — HuggingFace FLUX.1 image generation ──────────────────────
+// ── REPLICATE img2img (primary) ───────────────────────────────────────────────
+async function generateWithReplicate(prompt, imageBase64) {
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
+  if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
+
+  const enrichedPrompt = `${prompt}, highly detailed face, sharp eyes, realistic skin pores, subsurface scattering, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, masterpiece, best quality, hyperrealistic`;
+
+  // Start prediction
+  const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${REPLICATE_TOKEN}`,
+      "Content-Type": "application/json",
+      "Prefer": "wait=60",
+    },
+    body: JSON.stringify({
+      input: {
+        prompt: enrichedPrompt,
+        image: `data:image/jpeg;base64,${imageBase64}`,
+        prompt_strength: 0.75,
+        num_inference_steps: 28,
+        guidance_scale: 3.5,
+        width: 768,
+        height: 1024,
+        output_format: "jpeg",
+        output_quality: 90,
+      },
+    }),
+  });
+
+  if (!startRes.ok) {
+    const err = await startRes.text();
+    throw new Error(`Replicate start failed: ${err.slice(0, 200)}`);
+  }
+
+  let prediction = await startRes.json();
+
+  // Poll until done (max 90 seconds)
+  const maxWait = 90000;
+  const interval = 3000;
+  let waited = 0;
+
+  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
+    if (waited >= maxWait) throw new Error("Replicate timed out after 90 seconds");
+    await new Promise(r => setTimeout(r, interval));
+    waited += interval;
+
+    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
+      headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` },
+    });
+    prediction = await pollRes.json();
+  }
+
+  if (prediction.status === "failed") {
+    throw new Error(`Replicate generation failed: ${prediction.error}`);
+  }
+
+  // Fetch image and convert to base64
+  const imageUrl = prediction.output?.[0] || prediction.output;
+  if (!imageUrl) throw new Error("No image in Replicate response");
+
+  const imgRes = await fetch(imageUrl);
+  const buffer = await imgRes.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString("base64");
+  return `data:image/jpeg;base64,${base64}`;
+}
+
+// ── HUGGINGFACE img2img (fallback) ────────────────────────────────────────────
+async function generateWithHuggingFace(prompt, imageBase64) {
+  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
+  if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
+
+  const enrichedPrompt = `${prompt}, highly detailed face, sharp eyes, realistic skin pores, subsurface scattering, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, masterpiece, best quality, hyperrealistic`;
+
+  const response = await fetch(
+    "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${HF_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        inputs: enrichedPrompt,
+        parameters: {
+          num_inference_steps: 8,
+          width: 768,
+          height: 1024,
+          guidance_scale: 3.5,
+          image: imageBase64,
+          strength: 0.75,
+        }
+      })
+    }
+  );
+
+  if (response.status === 503) throw new Error("Model warming up. Try again in 20 seconds.");
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`HuggingFace ${response.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const buffer = await response.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString("base64");
+  return `data:image/jpeg;base64,${base64}`;
+}
+
+// ── /api/generate — Replicate primary, HuggingFace fallback ──────────────────
 app.post("/api/generate", async (req, res) => {
-  const { prompt } = req.body;
+  const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
-  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
-  if (!HF_TOKEN) return res.status(500).json({ error: "HUGGINGFACE_TOKEN not set on server" });
+  // Try Replicate first (img2img with photo reference)
+  if (process.env.REPLICATE_API_TOKEN && imageBase64) {
+    try {
+      console.log("[/api/generate] Trying Replicate img2img...");
+      const image = await generateWithReplicate(prompt, imageBase64);
+      return res.json({ image, source: "replicate" });
+    } catch (err) {
+      console.error("[/api/generate] Replicate failed, falling back to HuggingFace:", err.message);
+    }
+  }
 
+  // Fallback to HuggingFace
   try {
-    // Build enriched prompt with quality boosters and negative guidance
-    const enrichedPrompt = `${prompt}, highly detailed face, sharp eyes, realistic skin pores, subsurface scattering, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, masterpiece, best quality, hyperrealistic`;
-
-    const response = await fetch(
-      "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${HF_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          inputs: enrichedPrompt,
-          parameters: {
-            num_inference_steps: 8,
-            width: 768,
-            height: 1024,
-            guidance_scale: 3.5,
-          }
-        })
-      }
-    );
-
-    if (response.status === 503) {
-      return res.status(503).json({ error: "FLUX model is warming up. Wait 20 seconds and try again." });
-    }
-
-    if (!response.ok) {
-      const errText = await response.text();
-      return res.status(502).json({ error: `HuggingFace ${response.status}: ${errText.slice(0, 200)}` });
-    }
-
-    const buffer = await response.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString("base64");
-    return res.json({ image: `data:image/jpeg;base64,${base64}` });
-
+    console.log("[/api/generate] Using HuggingFace...");
+    const image = await generateWithHuggingFace(prompt, imageBase64);
+    return res.json({ image, source: "huggingface" });
   } catch (err) {
-    console.error("[/api/generate]", err.message);
+    console.error("[/api/generate] HuggingFace also failed:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
