@@ -97,7 +97,6 @@ async function generateWithReplicate(prompt, imageBase64) {
 
   const enrichedPrompt = `${prompt}, highly detailed face, sharp eyes, realistic skin pores, subsurface scattering, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, masterpiece, best quality, hyperrealistic`;
 
-  // Start prediction
   const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
     method: "POST",
     headers: {
@@ -127,7 +126,6 @@ async function generateWithReplicate(prompt, imageBase64) {
 
   let prediction = await startRes.json();
 
-  // Poll until done (max 90 seconds)
   const maxWait = 90000;
   const interval = 3000;
   let waited = 0;
@@ -147,7 +145,6 @@ async function generateWithReplicate(prompt, imageBase64) {
     throw new Error(`Replicate generation failed: ${prediction.error}`);
   }
 
-  // Fetch image and convert to base64
   const imageUrl = prediction.output?.[0] || prediction.output;
   if (!imageUrl) throw new Error("No image in Replicate response");
 
@@ -157,8 +154,8 @@ async function generateWithReplicate(prompt, imageBase64) {
   return `data:image/jpeg;base64,${base64}`;
 }
 
-// ── HUGGINGFACE img2img (fallback) ────────────────────────────────────────────
-async function generateWithHuggingFace(prompt, imageBase64) {
+// ── HUGGINGFACE text2img (fallback) ───────────────────────────────────────────
+async function generateWithHuggingFace(prompt) {
   const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
   if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
 
@@ -179,8 +176,6 @@ async function generateWithHuggingFace(prompt, imageBase64) {
           width: 768,
           height: 1024,
           guidance_scale: 3.5,
-          image: imageBase64,
-          strength: 0.75,
         }
       })
     }
@@ -202,7 +197,6 @@ app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
-  // Try Replicate first (img2img with photo reference)
   if (process.env.REPLICATE_API_TOKEN && imageBase64) {
     try {
       console.log("[/api/generate] Trying Replicate img2img...");
@@ -213,10 +207,9 @@ app.post("/api/generate", async (req, res) => {
     }
   }
 
-  // Fallback to HuggingFace
   try {
     console.log("[/api/generate] Using HuggingFace...");
-    const image = await generateWithHuggingFace(prompt, imageBase64);
+    const image = await generateWithHuggingFace(prompt);
     return res.json({ image, source: "huggingface" });
   } catch (err) {
     console.error("[/api/generate] HuggingFace also failed:", err.message);
