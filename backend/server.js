@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import FormData from "form-data";
 
 dotenv.config();
 
@@ -90,68 +91,48 @@ app.post("/api/analyze", async (req, res) => {
   }
 });
 
-// ── REPLICATE img2img (primary) ───────────────────────────────────────────────
-async function generateWithReplicate(prompt, imageBase64) {
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
-  if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
+// ── CLOUDFLARE FLUX.2 img2img (primary) ──────────────────────────────────────
+async function generateWithCloudflare(prompt, imageBase64) {
+  const CF_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+  const CF_ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!CF_TOKEN || !CF_ACCOUNT) throw new Error("Cloudflare credentials not set");
 
-  const enrichedPrompt = `${prompt}, highly detailed face, sharp eyes, realistic skin pores, subsurface scattering, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, masterpiece, best quality, hyperrealistic`;
+  const enrichedPrompt = `Take the exact person from the reference image — keep their face, skin tone, and body exactly as they are. Style them ${prompt}. Photorealistic, hyperrealistic skin texture, sharp facial details, realistic hair texture, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, true to life, masterpiece`;
 
-  const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${REPLICATE_TOKEN}`,
-      "Content-Type": "application/json",
-      "Prefer": "wait=60",
-    },
-    body: JSON.stringify({
-      input: {
-        prompt: enrichedPrompt,
-        image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt_strength: 0.75,
-        num_inference_steps: 28,
-        guidance_scale: 3.5,
-        width: 768,
-        height: 1024,
-        output_format: "jpeg",
-        output_quality: 90,
-      },
-    }),
+  const form = new FormData();
+  form.append("prompt", enrichedPrompt);
+  form.append("steps", "25");
+  form.append("width", "768");
+  form.append("height", "1024");
+
+  // Attach user photo as reference image
+  const imageBuffer = Buffer.from(imageBase64, "base64");
+  form.append("input_image_0", imageBuffer, {
+    filename: "reference.jpg",
+    contentType: "image/jpeg",
   });
 
-  if (!startRes.ok) {
-    const err = await startRes.text();
-    throw new Error(`Replicate start failed: ${err.slice(0, 200)}`);
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/@cf/black-forest-labs/flux-2-dev`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CF_TOKEN}`,
+        ...form.getHeaders(),
+      },
+      body: form,
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Cloudflare ${response.status}: ${errText.slice(0, 200)}`);
   }
 
-  let prediction = await startRes.json();
+  const data = await response.json();
+  if (!data.result?.image) throw new Error("No image in Cloudflare response");
 
-  const maxWait = 90000;
-  const interval = 3000;
-  let waited = 0;
-
-  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
-    if (waited >= maxWait) throw new Error("Replicate timed out after 90 seconds");
-    await new Promise(r => setTimeout(r, interval));
-    waited += interval;
-
-    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
-      headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` },
-    });
-    prediction = await pollRes.json();
-  }
-
-  if (prediction.status === "failed") {
-    throw new Error(`Replicate generation failed: ${prediction.error}`);
-  }
-
-  const imageUrl = prediction.output?.[0] || prediction.output;
-  if (!imageUrl) throw new Error("No image in Replicate response");
-
-  const imgRes = await fetch(imageUrl);
-  const buffer = await imgRes.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  return `data:image/jpeg;base64,${base64}`;
+  return `data:image/jpeg;base64,${data.result.image}`;
 }
 
 // ── HUGGINGFACE text2img (fallback) ───────────────────────────────────────────
@@ -192,23 +173,23 @@ async function generateWithHuggingFace(prompt) {
   return `data:image/jpeg;base64,${base64}`;
 }
 
-// ── /api/generate — Replicate primary, HuggingFace fallback ──────────────────
+// ── /api/generate — Cloudflare primary, HuggingFace fallback ─────────────────
 app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
-  if (process.env.REPLICATE_API_TOKEN && imageBase64) {
+  if (process.env.CLOUDFLARE_API_TOKEN && imageBase64) {
     try {
-      console.log("[/api/generate] Trying Replicate img2img...");
-      const image = await generateWithReplicate(prompt, imageBase64);
-      return res.json({ image, source: "replicate" });
+      console.log("[/api/generate] Trying Cloudflare FLUX.2 img2img...");
+      const image = await generateWithCloudflare(prompt, imageBase64);
+      return res.json({ image, source: "cloudflare" });
     } catch (err) {
-      console.error("[/api/generate] Replicate failed, falling back to HuggingFace:", err.message);
+      console.error("[/api/generate] Cloudflare failed, falling back to HuggingFace:", err.message);
     }
   }
 
   try {
-    console.log("[/api/generate] Using HuggingFace...");
+    console.log("[/api/generate] Using HuggingFace fallback...");
     const image = await generateWithHuggingFace(prompt);
     return res.json({ image, source: "huggingface" });
   } catch (err) {
