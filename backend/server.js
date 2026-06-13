@@ -59,12 +59,12 @@ app.post("/api/analyze", async (req, res) => {
 {
   "skinTone": "very precise skin tone e.g. deep ebony with cool undertones, rich dark brown with warm undertones, medium brown with golden undertones",
   "faceShape": "face shape e.g. oval, round, square, heart, oblong",
-  "facialFeatures": "very detailed facial features e.g. broad nose, full lips, strong jawline, high cheekbones, deep-set dark brown eyes, thick eyebrows, prominent forehead",
-  "bodyBuild": "detailed body build e.g. broad shoulders, athletic muscular build, slim waist",
+  "facialFeatures": "very detailed facial features e.g. broad flat nose, full voluminous lips, strong squared jawline, prominent high cheekbones, deep-set dark brown almond-shaped eyes, thick arched eyebrows, smooth forehead",
+  "bodyBuild": "detailed body build e.g. broad shoulders, athletic muscular build, slim waist, curvy hips",
   "gender": "woman or man",
   "ageRange": "approximate age range e.g. mid 20s, early 30s",
   "currentStyle": "one sentence about their current style",
-  "fluxPromptBase": "A highly detailed photorealistic portrait of a [gender], [skin tone] skin with [undertones], [face shape] face shape, [detailed facial features including eyes, nose, lips, jawline], [body build], sharp facial details, hyperrealistic skin texture, professional fashion model"
+  "realisticVisionPrompt": "RAW photo, a [gender] in [age range], [skin tone] skin, [face shape] face, [detailed facial features], [body build], natural skin texture, skin pores visible, shot on Canon EOS R5, 85mm lens, f/1.8 aperture, soft natural window light, professional fashion portrait"
 }`,
               },
             ],
@@ -90,12 +90,21 @@ app.post("/api/analyze", async (req, res) => {
   }
 });
 
-// ── GEMINI 2.5 FLASH IMAGE "Nano Banana" — true photo editing (primary) ──────
+// ── Shared prompt builder ─────────────────────────────────────────────────────
+function buildRealisticPrompt(prompt) {
+  return `RAW photo, ${prompt}, natural skin texture, visible skin pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, shot on Canon EOS R5, 85mm f/1.8 lens, soft diffused studio lighting, catchlights in eyes, shallow depth of field, high fashion editorial photography, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
+}
+
+function buildNegativePrompt() {
+  return "cartoon, anime, illustration, painting, drawing, CGI, 3d render, plastic skin, blurry face, disfigured, deformed, extra limbs, bad anatomy, watermark, signature, text, low quality, worst quality, jpeg artifacts, overexposed, underexposed, flat lighting";
+}
+
+// ── GEMINI 2.5 FLASH IMAGE (primary — true photo editing) ────────────────────
 async function generateWithGemini(prompt, imageBase64) {
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_KEY) throw new Error("GEMINI_API_KEY not set");
 
-  const enrichedPrompt = `Edit this exact photo. Keep the person's face, identity, skin tone, and body completely unchanged — do not generate a different person. Change only their hairstyle and outfit to: ${prompt}. Make the result photorealistic, hyperrealistic skin texture, sharp facial details, realistic natural hair texture, professional fashion editorial photography, studio lighting, high quality, 4k, true to life.`;
+  const enrichedPrompt = `Edit this exact photo realistically. Keep the person's face, identity, skin tone, and body completely unchanged — do not generate a new person. Only change their hairstyle and outfit to: ${prompt}. Requirements: photorealistic result, hyperrealistic skin texture with visible pores, realistic natural hair strand detail (especially 4C coil texture if applicable), true fabric drape and texture, professional fashion editorial photography, soft studio lighting, shot on 85mm lens, sharp facial details, true to life. Do not smooth or alter the face.`;
 
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${GEMINI_KEY}`,
@@ -119,7 +128,7 @@ async function generateWithGemini(prompt, imageBase64) {
   const parts = data.candidates?.[0]?.content?.parts || [];
   const imagePart = parts.find(p => p.inlineData || p.inline_data);
   const inline = imagePart?.inlineData || imagePart?.inline_data;
-  if (!inline?.data) throw new Error("No image returned from Gemini — response may have been text-only");
+  if (!inline?.data) throw new Error("No image returned from Gemini — model may have declined");
 
   const mime = inline.mimeType || inline.mime_type || "image/png";
   return `data:${mime};base64,${inline.data}`;
@@ -130,7 +139,9 @@ async function generateWithReplicate(prompt, imageBase64) {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
   if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
 
-  const enrichedPrompt = `Take the exact person from the reference image — keep their face, skin tone, and body. Style them ${prompt}. Photorealistic, hyperrealistic skin texture, sharp facial details, realistic hair texture, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, true to life, masterpiece`;
+  const enrichedPrompt = buildRealisticPrompt(
+    `keeping the exact face and skin tone from the reference image, ${prompt}`
+  );
 
   const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
     method: "POST",
@@ -143,13 +154,13 @@ async function generateWithReplicate(prompt, imageBase64) {
       input: {
         prompt: enrichedPrompt,
         image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt_strength: 0.75,
-        num_inference_steps: 28,
-        guidance_scale: 3.5,
+        prompt_strength: 0.70,   // lower = more face preservation
+        num_inference_steps: 30,
+        guidance_scale: 4.0,
         width: 768,
         height: 1024,
         output_format: "jpeg",
-        output_quality: 90,
+        output_quality: 92,
       },
     }),
   });
@@ -189,52 +200,81 @@ async function generateWithReplicate(prompt, imageBase64) {
   return `data:image/jpeg;base64,${base64}`;
 }
 
-// ── HUGGINGFACE text2img (final fallback) ─────────────────────────────────────
+// ── HUGGINGFACE — Realistic Vision v6 (final fallback, much better than FLUX-schnell) ──
 async function generateWithHuggingFace(prompt) {
   const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
   if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
 
-  const enrichedPrompt = `${prompt}, highly detailed face, sharp eyes, realistic skin pores, subsurface scattering, 8k uhd, dslr photo, soft studio lighting, high fashion editorial photography, vogue magazine cover, masterpiece, best quality, hyperrealistic`;
+  const enrichedPrompt = buildRealisticPrompt(prompt);
+  const negativePrompt = buildNegativePrompt();
 
-  const response = await fetch(
-    "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${HF_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        inputs: enrichedPrompt,
-        parameters: {
-          num_inference_steps: 8,
-          width: 768,
-          height: 1024,
-          guidance_scale: 3.5,
+  // Try Realistic Vision v6 first — fine-tuned for human portraiture
+  const models = [
+    "SG161222/Realistic_Vision_V6.0_B1_noVAE",
+    "emilianJR/epiCRealism",
+    "black-forest-labs/FLUX.1-dev",  // better than schnell if above fail
+    "black-forest-labs/FLUX.1-schnell", // last resort
+  ];
+
+  for (const model of models) {
+    try {
+      console.log(`[HuggingFace] Trying model: ${model}`);
+      const response = await fetch(
+        `https://router.huggingface.co/hf-inference/models/${model}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${HF_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            inputs: enrichedPrompt,
+            parameters: {
+              negative_prompt: negativePrompt,
+              num_inference_steps: model.includes("schnell") ? 8 : 25,
+              width: 512,
+              height: 768,
+              guidance_scale: 7.0,
+              scheduler: "DPMSolverMultistepScheduler",
+            }
+          })
         }
-      })
-    }
-  );
+      );
 
-  if (response.status === 503) throw new Error("Model warming up. Try again in 20 seconds.");
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`HuggingFace ${response.status}: ${errText.slice(0, 200)}`);
+      if (response.status === 503) {
+        console.log(`[HuggingFace] ${model} warming up, trying next...`);
+        continue;
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.log(`[HuggingFace] ${model} failed: ${errText.slice(0, 100)}, trying next...`);
+        continue;
+      }
+
+      const buffer = await response.arrayBuffer();
+      const base64 = Buffer.from(buffer).toString("base64");
+      console.log(`[HuggingFace] Success with model: ${model}`);
+      return `data:image/jpeg;base64,${base64}`;
+
+    } catch (err) {
+      console.log(`[HuggingFace] ${model} error: ${err.message}, trying next...`);
+      continue;
+    }
   }
 
-  const buffer = await response.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  return `data:image/jpeg;base64,${base64}`;
+  throw new Error("All HuggingFace models failed or are unavailable");
 }
 
-// ── /api/generate — Gemini (Nano Banana) → Replicate → HuggingFace ───────────
+// ── /api/generate — Gemini → Replicate → HuggingFace Realistic Vision ────────
 app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
+  // 1. Gemini — best for true photo editing (keeps exact face)
   if (process.env.GEMINI_API_KEY && imageBase64) {
     try {
-      console.log("[/api/generate] Trying Gemini 2.5 Flash Image (Nano Banana)...");
+      console.log("[/api/generate] Trying Gemini 2.5 Flash Image...");
       const image = await generateWithGemini(prompt, imageBase64);
       return res.json({ image, source: "gemini" });
     } catch (err) {
@@ -242,6 +282,7 @@ app.post("/api/generate", async (req, res) => {
     }
   }
 
+  // 2. Replicate — img2img with photo reference
   if (process.env.REPLICATE_API_TOKEN && imageBase64) {
     try {
       console.log("[/api/generate] Trying Replicate img2img...");
@@ -252,12 +293,13 @@ app.post("/api/generate", async (req, res) => {
     }
   }
 
+  // 3. HuggingFace — Realistic Vision v6 (much better than FLUX-schnell)
   try {
-    console.log("[/api/generate] Using HuggingFace fallback...");
+    console.log("[/api/generate] Using HuggingFace Realistic Vision...");
     const image = await generateWithHuggingFace(prompt);
     return res.json({ image, source: "huggingface" });
   } catch (err) {
-    console.error("[/api/generate] HuggingFace also failed:", err.message);
+    console.error("[/api/generate] All generation methods failed:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
