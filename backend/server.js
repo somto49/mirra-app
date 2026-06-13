@@ -154,7 +154,7 @@ async function generateWithReplicate(prompt, imageBase64) {
       input: {
         prompt: enrichedPrompt,
         image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt_strength: 0.70,   // lower = more face preservation
+        prompt_strength: 0.70,
         num_inference_steps: 30,
         guidance_scale: 4.0,
         width: 768,
@@ -200,27 +200,24 @@ async function generateWithReplicate(prompt, imageBase64) {
   return `data:image/jpeg;base64,${base64}`;
 }
 
-// ── HUGGINGFACE — Realistic Vision v6 (final fallback, much better than FLUX-schnell) ──
+// ── HUGGINGFACE — FLUX models (final fallback) ────────────────────────────────
 async function generateWithHuggingFace(prompt) {
   const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
   if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
 
   const enrichedPrompt = buildRealisticPrompt(prompt);
-  const negativePrompt = buildNegativePrompt();
 
-  // Try Realistic Vision v6 first — fine-tuned for human portraiture
+  // Free-tier accessible FLUX models — ordered by quality
   const models = [
-    "SG161222/Realistic_Vision_V6.0_B1_noVAE",
-    "emilianJR/epiCRealism",
-    "black-forest-labs/FLUX.1-dev",  // better than schnell if above fail
-    "black-forest-labs/FLUX.1-schnell", // last resort
+    { id: "black-forest-labs/FLUX.1-dev", steps: 20, guidance: 3.5 },
+    { id: "black-forest-labs/FLUX.1-schnell", steps: 8, guidance: 0 },
   ];
 
   for (const model of models) {
     try {
-      console.log(`[HuggingFace] Trying model: ${model}`);
+      console.log(`[HuggingFace] Trying model: ${model.id}`);
       const response = await fetch(
-        `https://router.huggingface.co/hf-inference/models/${model}`,
+        `https://router.huggingface.co/hf-inference/models/${model.id}`,
         {
           method: "POST",
           headers: {
@@ -230,43 +227,41 @@ async function generateWithHuggingFace(prompt) {
           body: JSON.stringify({
             inputs: enrichedPrompt,
             parameters: {
-              negative_prompt: negativePrompt,
-              num_inference_steps: model.includes("schnell") ? 8 : 25,
-              width: 512,
-              height: 768,
-              guidance_scale: 7.0,
-              scheduler: "DPMSolverMultistepScheduler",
+              num_inference_steps: model.steps,
+              width: 768,
+              height: 1024,
+              guidance_scale: model.guidance,
             }
           })
         }
       );
 
       if (response.status === 503) {
-        console.log(`[HuggingFace] ${model} warming up, trying next...`);
+        console.log(`[HuggingFace] ${model.id} warming up, trying next...`);
         continue;
       }
 
       if (!response.ok) {
         const errText = await response.text();
-        console.log(`[HuggingFace] ${model} failed: ${errText.slice(0, 100)}, trying next...`);
+        console.log(`[HuggingFace] ${model.id} failed: ${errText.slice(0, 100)}, trying next...`);
         continue;
       }
 
       const buffer = await response.arrayBuffer();
       const base64 = Buffer.from(buffer).toString("base64");
-      console.log(`[HuggingFace] Success with model: ${model}`);
+      console.log(`[HuggingFace] Success with model: ${model.id}`);
       return `data:image/jpeg;base64,${base64}`;
 
     } catch (err) {
-      console.log(`[HuggingFace] ${model} error: ${err.message}, trying next...`);
+      console.log(`[HuggingFace] ${model.id} error: ${err.message}, trying next...`);
       continue;
     }
   }
 
-  throw new Error("All HuggingFace models failed or are unavailable");
+  throw new Error("HuggingFace models are unavailable — please try again in a moment");
 }
 
-// ── /api/generate — Gemini → Replicate → HuggingFace Realistic Vision ────────
+// ── /api/generate — Gemini → Replicate → HuggingFace ─────────────────────────
 app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
@@ -293,9 +288,9 @@ app.post("/api/generate", async (req, res) => {
     }
   }
 
-  // 3. HuggingFace — Realistic Vision v6 (much better than FLUX-schnell)
+  // 3. HuggingFace — FLUX.1-dev then FLUX.1-schnell
   try {
-    console.log("[/api/generate] Using HuggingFace Realistic Vision...");
+    console.log("[/api/generate] Using HuggingFace fallback...");
     const image = await generateWithHuggingFace(prompt);
     return res.json({ image, source: "huggingface" });
   } catch (err) {
