@@ -154,7 +154,7 @@ async function generateWithReplicate(prompt, imageBase64) {
       input: {
         prompt: enrichedPrompt,
         image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt_strength: 0.70,
+        prompt_strength: 0.70,   // lower = more face preservation
         num_inference_steps: 30,
         guidance_scale: 4.0,
         width: 768,
@@ -200,12 +200,13 @@ async function generateWithReplicate(prompt, imageBase64) {
   return `data:image/jpeg;base64,${base64}`;
 }
 
-// ── HUGGINGFACE — FLUX models (final fallback) ────────────────────────────────
+// ── HUGGINGFACE — Realistic Vision v6 (final fallback, much better than FLUX-schnell) ──
 async function generateWithHuggingFace(prompt) {
   const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
   if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
 
   const enrichedPrompt = buildRealisticPrompt(prompt);
+  const negativePrompt = buildNegativePrompt();
 
   // Free-tier accessible FLUX models — ordered by quality
   const models = [
@@ -261,10 +262,16 @@ async function generateWithHuggingFace(prompt) {
   throw new Error("HuggingFace models are unavailable — please try again in a moment");
 }
 
-// ── /api/generate — Gemini → Replicate → HuggingFace ─────────────────────────
+// ── /api/generate — Gemini → Replicate → HuggingFace ────────────────────────
 app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
+
+  // Debug logs to confirm what arrived
+  console.log("[/api/generate] prompt length:", prompt?.length);
+  console.log("[/api/generate] imageBase64 present:", !!imageBase64, "| length:", imageBase64?.length);
+  console.log("[/api/generate] REPLICATE_API_TOKEN present:", !!process.env.REPLICATE_API_TOKEN);
+  console.log("[/api/generate] GEMINI_API_KEY present:", !!process.env.GEMINI_API_KEY);
 
   // 1. Gemini — best for true photo editing (keeps exact face)
   if (process.env.GEMINI_API_KEY && imageBase64) {
@@ -286,9 +293,11 @@ app.post("/api/generate", async (req, res) => {
     } catch (err) {
       console.error("[/api/generate] Replicate failed:", err.message);
     }
+  } else {
+    console.log("[/api/generate] Skipping Replicate — token:", !!process.env.REPLICATE_API_TOKEN, "| imageBase64:", !!imageBase64);
   }
 
-  // 3. HuggingFace — FLUX.1-dev then FLUX.1-schnell
+  // 3. HuggingFace — FLUX.1-schnell fallback
   try {
     console.log("[/api/generate] Using HuggingFace fallback...");
     const image = await generateWithHuggingFace(prompt);
