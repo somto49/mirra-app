@@ -154,12 +154,12 @@ async function generateWithReplicate(prompt, imageBase64) {
       input: {
         prompt: enrichedPrompt,
         image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt_strength: 0.70,   // lower = more face preservation
+        prompt_strength: 0.70,
         num_inference_steps: 30,
         guidance_scale: 4.0,
         width: 768,
         height: 1024,
-        output_format: "jpeg",
+        output_format: "jpg",
         output_quality: 92,
       },
     }),
@@ -200,17 +200,14 @@ async function generateWithReplicate(prompt, imageBase64) {
   return `data:image/jpeg;base64,${base64}`;
 }
 
-// ── HUGGINGFACE — Realistic Vision v6 (final fallback, much better than FLUX-schnell) ──
+// ── HUGGINGFACE — FLUX.1-schnell (final fallback) ─────────────────────────────
 async function generateWithHuggingFace(prompt) {
   const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
   if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
 
   const enrichedPrompt = buildRealisticPrompt(prompt);
-  const negativePrompt = buildNegativePrompt();
 
-  // Free-tier accessible FLUX models — ordered by quality
   const models = [
-    { id: "black-forest-labs/FLUX.1-dev", steps: 20, guidance: 3.5 },
     { id: "black-forest-labs/FLUX.1-schnell", steps: 8, guidance: 0 },
   ];
 
@@ -267,13 +264,12 @@ app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
-  // Debug logs to confirm what arrived
   console.log("[/api/generate] prompt length:", prompt?.length);
   console.log("[/api/generate] imageBase64 present:", !!imageBase64, "| length:", imageBase64?.length);
   console.log("[/api/generate] REPLICATE_API_TOKEN present:", !!process.env.REPLICATE_API_TOKEN);
   console.log("[/api/generate] GEMINI_API_KEY present:", !!process.env.GEMINI_API_KEY);
 
-  // 1. Gemini — best for true photo editing (keeps exact face)
+  // 1. Gemini — true photo editing (keeps exact face)
   if (process.env.GEMINI_API_KEY && imageBase64) {
     try {
       console.log("[/api/generate] Trying Gemini 2.5 Flash Image...");
