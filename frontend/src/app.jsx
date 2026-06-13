@@ -136,7 +136,7 @@ function SelectCard({ item, selected, onClick }) {
         boxShadow: selected ? `0 0 16px ${c}30` : hovered ? `0 4px 16px ${c}20` : "none",
       }}>
       {selected && <div style={{ position: "absolute", top: 8, right: 10, color: c, fontSize: 10 }}>✦</div>}
-      <div style={{ color: selected ? c : hovered ? T.cream : T.cream, fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
+      <div style={{ color: selected ? c : T.cream, fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
         {item.label}
       </div>
       <div style={{ color: T.muted, fontSize: 11 }}>{item.desc || item.category}</div>
@@ -185,8 +185,13 @@ export default function App() {
     if (!selectedHair || !selectedOutfit) return;
     setStep("generating");
     setError(null);
-    const base = personData?.fluxPromptBase || "A beautiful woman with rich deep brown skin,";
-    const prompt = `${base} ${OUTFIT_PROMPTS[selectedOutfit]}, ${HAIR_PROMPTS[selectedHair]}, professional fashion photography, editorial lighting, luxury magazine shoot, sharp focus, photorealistic, 8k`;
+    const gender = personData?.gender || "person";
+    const skinTone = personData?.skinTone || "rich deep brown skin";
+    const bodyBuild = personData?.bodyBuild || "";
+    const facialFeatures = personData?.facialFeatures || "";
+    const base = personData?.realisticVisionPrompt ||
+      `RAW photo, a ${gender}, ${skinTone}, ${facialFeatures}, ${bodyBuild}, natural skin texture, professional fashion portrait`;
+    const prompt = `${base}, ${OUTFIT_PROMPTS[selectedOutfit]}, ${HAIR_PROMPTS[selectedHair]}, professional fashion photography, editorial lighting, luxury magazine shoot, sharp focus, photorealistic, 8k`;
     try {
       const url = await generateLook(prompt, photoBase64);
       setGeneratedImage(url);
