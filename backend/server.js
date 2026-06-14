@@ -95,16 +95,14 @@ function buildRealisticPrompt(prompt) {
   return `RAW photo, ${prompt}, natural skin texture, visible skin pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, shot on Canon EOS R5, 85mm f/1.8 lens, soft diffused studio lighting, catchlights in eyes, shallow depth of field, high fashion editorial photography, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
 }
 
-// ── REPLICATE img2img (primary) ───────────────────────────────────────────────
+// ── REPLICATE InstantID (primary — true face preservation) ───────────────────
 async function generateWithReplicate(prompt, imageBase64) {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
   if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
 
-  const enrichedPrompt = buildRealisticPrompt(
-    `keeping the exact face, age, and skin tone from the reference image, ${prompt}`
-  );
+  const enrichedPrompt = buildRealisticPrompt(prompt);
 
-  const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
+  const startRes = await fetch("https://api.replicate.com/v1/models/zsxkib/instant-id/predictions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${REPLICATE_TOKEN}`,
@@ -113,15 +111,15 @@ async function generateWithReplicate(prompt, imageBase64) {
     },
     body: JSON.stringify({
       input: {
-        prompt: enrichedPrompt,
         image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt_strength: 0.85,
+        prompt: enrichedPrompt,
+        negative_prompt: "cartoon, anime, illustration, painting, plastic skin, blurry face, disfigured, deformed, extra limbs, bad anatomy, watermark, text, low quality, worst quality, nsfw",
         num_inference_steps: 30,
-        guidance_scale: 4.0,
+        guidance_scale: 5.0,
+        ip_adapter_scale: 0.8,
+        controlnet_conditioning_scale: 0.8,
         width: 768,
         height: 1024,
-        output_format: "jpg",
-        output_quality: 92,
       },
     }),
   });
@@ -133,12 +131,12 @@ async function generateWithReplicate(prompt, imageBase64) {
 
   let prediction = await startRes.json();
 
-  const maxWait = 90000;
+  const maxWait = 120000;
   const interval = 3000;
   let waited = 0;
 
   while (prediction.status !== "succeeded" && prediction.status !== "failed") {
-    if (waited >= maxWait) throw new Error("Replicate timed out after 90 seconds");
+    if (waited >= maxWait) throw new Error("Replicate timed out after 120 seconds");
     await new Promise(r => setTimeout(r, interval));
     waited += interval;
 
@@ -201,7 +199,7 @@ async function generateWithHuggingFace(prompt) {
   return `data:image/jpeg;base64,${base64}`;
 }
 
-// ── /api/generate — Replicate → HuggingFace ──────────────────────────────────
+// ── /api/generate — InstantID → HuggingFace ──────────────────────────────────
 app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64 } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
@@ -210,12 +208,12 @@ app.post("/api/generate", async (req, res) => {
   console.log("[/api/generate] imageBase64 present:", !!imageBase64, "| length:", imageBase64?.length);
   console.log("[/api/generate] REPLICATE_API_TOKEN present:", !!process.env.REPLICATE_API_TOKEN);
 
-  // 1. Replicate — img2img with photo reference (primary)
+  // 1. Replicate InstantID — true face preservation (primary)
   if (process.env.REPLICATE_API_TOKEN && imageBase64) {
     try {
-      console.log("[/api/generate] Trying Replicate img2img...");
+      console.log("[/api/generate] Trying Replicate InstantID...");
       const image = await generateWithReplicate(prompt, imageBase64);
-      console.log("[/api/generate] Replicate succeeded!");
+      console.log("[/api/generate] Replicate InstantID succeeded!");
       return res.json({ image, source: "replicate" });
     } catch (err) {
       console.error("[/api/generate] Replicate failed:", err.message);
