@@ -83,11 +83,11 @@ async function analyzePhoto(imageBase64) {
   return data;
 }
 
-async function generateLook(prompt, imageBase64) {
+async function generateLook(prompt, imageBase64, personData) {
   const res = await fetch(`${API_URL}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, imageBase64 }),
+    body: JSON.stringify({ prompt, imageBase64, personData }),
   });
   const data = await res.json();
   if (data.error) throw new Error(data.error);
@@ -193,7 +193,7 @@ export default function App() {
       `RAW photo, a ${gender}, ${skinTone}, ${facialFeatures}, ${bodyBuild}, natural skin texture, professional fashion portrait`;
     const prompt = `${base}, ${OUTFIT_PROMPTS[selectedOutfit]}, ${HAIR_PROMPTS[selectedHair]}, professional fashion photography, editorial lighting, luxury magazine shoot, sharp focus, photorealistic, 8k`;
     try {
-      const url = await generateLook(prompt, photoBase64);
+      const url = await generateLook(prompt, photoBase64, personData);
       setGeneratedImage(url);
       const hair = HAIRSTYLES.find(h => h.id === selectedHair);
       const outfit = OUTFITS.find(o => o.id === selectedOutfit);
@@ -337,7 +337,7 @@ export default function App() {
                 {[
                   { step: "01", title: "Upload Your Photo", desc: "Drop a clear front-facing photo. Our AI reads your skin tone, face shape and features.", icon: "📷" },
                   { step: "02", title: "Pick Your Style", desc: "Choose from 10 4C hairstyles and 10 curated fashion looks. Hair and outfit work together.", icon: "✦" },
-                  { step: "03", title: "See Your Look", desc: "Our AI generates an editorial-quality fashion image of you in under 45 seconds.", icon: "🖼️" },
+                  { step: "03", title: "See Your Look", desc: "Our AI generates an editorial-quality fashion image of you in under 60 seconds.", icon: "🖼️" },
                 ].map(s => (
                   <div key={s.step} style={{
                     background: T.card, border: `1px solid ${T.border}`,
@@ -513,7 +513,7 @@ export default function App() {
                 {hair?.label} + {outfit?.label}
               </h2>
               <p style={{ color: T.muted, fontSize: 13, lineHeight: 1.7 }}>
-                Our AI is rendering your editorial look.<br />This takes 30–60 seconds — hang tight!
+                Our AI is rendering your editorial look.<br />This takes 45–90 seconds — hang tight!
               </p>
             </div>
             {photoUrl && (
