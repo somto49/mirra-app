@@ -95,14 +95,43 @@ function buildRealisticPrompt(prompt) {
   return `RAW photo, ${prompt}, natural skin texture, visible skin pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, shot on Canon EOS R5, 85mm f/1.8 lens, soft diffused studio lighting, catchlights in eyes, shallow depth of field, high fashion editorial photography, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
 }
 
-// ── REPLICATE InstantID (primary — true face preservation) ───────────────────
-async function generateWithReplicate(prompt, imageBase64) {
+// ── Helper: poll Replicate until done ────────────────────────────────────────
+async function pollReplicate(predictionId, token, maxWait = 120000) {
+  const interval = 3000;
+  let waited = 0;
+  let prediction = { status: "starting" };
+
+  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
+    if (waited >= maxWait) throw new Error("Replicate timed out");
+    await new Promise(r => setTimeout(r, interval));
+    waited += interval;
+
+    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    prediction = await pollRes.json();
+  }
+
+  if (prediction.status === "failed") throw new Error(`Replicate failed: ${prediction.error}`);
+  return prediction.output?.[0] || prediction.output;
+}
+
+// ── Step 1: Generate fashion model with FLUX ──────────────────────────────────
+async function generateFashionModel(prompt, personData) {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
-  if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
 
-  const enrichedPrompt = buildRealisticPrompt(prompt);
+  const gender = personData?.gender || "person";
+  const skinTone = personData?.skinTone || "deep dark brown skin";
+  const bodyBuild = personData?.bodyBuild || "athletic build";
+  const ageRange = personData?.ageRange || "";
 
-  const startRes = await fetch("https://api.replicate.com/v1/models/zsxkib/instant-id/predictions", {
+  const fashionPrompt = buildRealisticPrompt(
+    `a ${ageRange} ${gender}, ${skinTone}, ${bodyBuild}, ${prompt}`
+  );
+
+  console.log("[Step 1] Generating fashion model with FLUX...");
+
+  const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${REPLICATE_TOKEN}`,
@@ -111,122 +140,133 @@ async function generateWithReplicate(prompt, imageBase64) {
     },
     body: JSON.stringify({
       input: {
-        image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt: enrichedPrompt,
-        negative_prompt: "cartoon, anime, illustration, painting, plastic skin, blurry face, disfigured, deformed, extra limbs, bad anatomy, watermark, text, low quality, worst quality, nsfw",
-        num_inference_steps: 30,
-        guidance_scale: 5.0,
-        ip_adapter_scale: 0.8,
-        controlnet_conditioning_scale: 0.8,
+        prompt: fashionPrompt,
+        num_inference_steps: 28,
+        guidance_scale: 3.5,
         width: 768,
         height: 1024,
+        output_format: "jpg",
+        output_quality: 92,
       },
     }),
   });
 
   if (!startRes.ok) {
     const err = await startRes.text();
-    throw new Error(`Replicate start failed: ${err.slice(0, 200)}`);
+    throw new Error(`FLUX start failed: ${err.slice(0, 200)}`);
   }
 
-  let prediction = await startRes.json();
+  const prediction = await startRes.json();
 
-  const maxWait = 120000;
-  const interval = 3000;
-  let waited = 0;
-
-  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
-    if (waited >= maxWait) throw new Error("Replicate timed out after 120 seconds");
-    await new Promise(r => setTimeout(r, interval));
-    waited += interval;
-
-    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
-      headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` },
-    });
-    prediction = await pollRes.json();
+  // If already done (Prefer: wait worked)
+  if (prediction.status === "succeeded") {
+    return prediction.output?.[0] || prediction.output;
   }
 
-  if (prediction.status === "failed") {
-    throw new Error(`Replicate generation failed: ${prediction.error}`);
-  }
-
-  const imageUrl = prediction.output?.[0] || prediction.output;
-  if (!imageUrl) throw new Error("No image in Replicate response");
-
-  const imgRes = await fetch(imageUrl);
-  const buffer = await imgRes.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  return `data:image/jpeg;base64,${base64}`;
+  return await pollReplicate(prediction.id, REPLICATE_TOKEN);
 }
 
-// ── HUGGINGFACE — FLUX.1-schnell (fallback) ───────────────────────────────────
-async function generateWithHuggingFace(prompt) {
-  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
-  if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
+// ── Step 2: Swap user's face onto fashion model ───────────────────────────────
+async function swapFace(sourceImageBase64, targetImageUrl) {
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 
-  const enrichedPrompt = buildRealisticPrompt(prompt);
+  console.log("[Step 2] Swapping face onto fashion model...");
 
-  console.log("[HuggingFace] Trying model: black-forest-labs/FLUX.1-schnell");
-  const response = await fetch(
-    "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${HF_TOKEN}`,
-        "Content-Type": "application/json",
+  const startRes = await fetch("https://api.replicate.com/v1/models/lucataco/faceswap/predictions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${REPLICATE_TOKEN}`,
+      "Content-Type": "application/json",
+      "Prefer": "wait=60",
+    },
+    body: JSON.stringify({
+      input: {
+        target_image: targetImageUrl,
+        swap_image: `data:image/jpeg;base64,${sourceImageBase64}`,
       },
-      body: JSON.stringify({
-        inputs: enrichedPrompt,
-        parameters: {
-          num_inference_steps: 8,
-          width: 768,
-          height: 1024,
-          guidance_scale: 0,
-        }
-      })
-    }
-  );
+    }),
+  });
 
-  if (response.status === 503) throw new Error("Model warming up. Try again in 20 seconds.");
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`HuggingFace ${response.status}: ${errText.slice(0, 200)}`);
+  if (!startRes.ok) {
+    const err = await startRes.text();
+    throw new Error(`FaceSwap start failed: ${err.slice(0, 200)}`);
   }
 
-  const buffer = await response.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  console.log("[HuggingFace] Success with model: black-forest-labs/FLUX.1-schnell");
-  return `data:image/jpeg;base64,${base64}`;
+  const prediction = await startRes.json();
+
+  if (prediction.status === "succeeded") {
+    return prediction.output?.[0] || prediction.output;
+  }
+
+  return await pollReplicate(prediction.id, REPLICATE_TOKEN);
 }
 
-// ── /api/generate — InstantID → HuggingFace ──────────────────────────────────
+// ── /api/generate — Two-step: FLUX + FaceSwap ────────────────────────────────
 app.post("/api/generate", async (req, res) => {
-  const { prompt, imageBase64 } = req.body;
+  const { prompt, imageBase64, personData } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
   console.log("[/api/generate] prompt length:", prompt?.length);
-  console.log("[/api/generate] imageBase64 present:", !!imageBase64, "| length:", imageBase64?.length);
+  console.log("[/api/generate] imageBase64 present:", !!imageBase64);
   console.log("[/api/generate] REPLICATE_API_TOKEN present:", !!process.env.REPLICATE_API_TOKEN);
 
-  // 1. Replicate InstantID — true face preservation (primary)
-  if (process.env.REPLICATE_API_TOKEN && imageBase64) {
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
+
+  // Two-step: Generate fashion model → swap face
+  if (REPLICATE_TOKEN && imageBase64) {
     try {
-      console.log("[/api/generate] Trying Replicate InstantID...");
-      const image = await generateWithReplicate(prompt, imageBase64);
-      console.log("[/api/generate] Replicate InstantID succeeded!");
-      return res.json({ image, source: "replicate" });
+      // Step 1: Generate the fashion look
+      const fashionModelUrl = await generateFashionModel(prompt, personData);
+      console.log("[Step 1] Fashion model generated:", fashionModelUrl);
+
+      // Step 2: Swap the user's face onto it
+      const finalImageUrl = await swapFace(imageBase64, fashionModelUrl);
+      console.log("[Step 2] Face swap complete:", finalImageUrl);
+
+      // Fetch final image and convert to base64
+      const imgRes = await fetch(finalImageUrl);
+      const buffer = await imgRes.arrayBuffer();
+      const base64 = Buffer.from(buffer).toString("base64");
+      return res.json({ image: `data:image/jpeg;base64,${base64}`, source: "faceswap" });
+
     } catch (err) {
-      console.error("[/api/generate] Replicate failed:", err.message);
+      console.error("[/api/generate] Two-step failed:", err.message);
     }
   }
 
-  // 2. HuggingFace — FLUX.1-schnell fallback
+  // Fallback — HuggingFace FLUX.1-schnell
   try {
     console.log("[/api/generate] Using HuggingFace fallback...");
-    const image = await generateWithHuggingFace(prompt);
-    return res.json({ image, source: "huggingface" });
+    const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
+    if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
+
+    const enrichedPrompt = buildRealisticPrompt(prompt);
+    const response = await fetch(
+      "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${HF_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: enrichedPrompt,
+          parameters: { num_inference_steps: 8, width: 768, height: 1024, guidance_scale: 0 }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`HuggingFace ${response.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    return res.json({ image: `data:image/jpeg;base64,${base64}`, source: "huggingface" });
+
   } catch (err) {
-    console.error("[/api/generate] All generation methods failed:", err.message);
+    console.error("[/api/generate] All methods failed:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
