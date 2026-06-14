@@ -144,6 +144,66 @@ function SelectCard({ item, selected, onClick }) {
   );
 }
 
+// ── Before/After Slider Component ─────────────────────────────────────────────
+function BeforeAfterSlider({ beforeUrl, afterUrl }) {
+  const [sliderPos, setSliderPos] = useState(50);
+  const containerRef = useRef();
+
+  const handleMove = useCallback((clientX) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const pos = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
+    setSliderPos(pos);
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      onMouseMove={e => handleMove(e.clientX)}
+      onTouchMove={e => handleMove(e.touches[0].clientX)}
+      style={{ position: "relative", width: "100%", borderRadius: 18, overflow: "hidden", cursor: "ew-resize", userSelect: "none" }}
+    >
+      {/* After image (full) */}
+      <img src={afterUrl} alt="after" style={{ width: "100%", display: "block", borderRadius: 18 }} />
+
+      {/* Before image (clipped) */}
+      <div style={{
+        position: "absolute", top: 0, left: 0, width: `${sliderPos}%`, height: "100%", overflow: "hidden",
+      }}>
+        <img src={beforeUrl} alt="before" style={{ width: containerRef.current?.offsetWidth || 440, maxWidth: "none", height: "100%", objectFit: "cover", display: "block" }} />
+      </div>
+
+      {/* Divider line */}
+      <div style={{
+        position: "absolute", top: 0, left: `${sliderPos}%`, transform: "translateX(-50%)",
+        width: 2, height: "100%", background: "#fff", boxShadow: "0 0 8px rgba(0,0,0,0.5)",
+      }} />
+
+      {/* Handle */}
+      <div style={{
+        position: "absolute", top: "50%", left: `${sliderPos}%`,
+        transform: "translate(-50%, -50%)",
+        width: 36, height: 36, borderRadius: "50%",
+        background: "#fff", boxShadow: "0 2px 12px rgba(0,0,0,0.4)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 14, color: "#333",
+      }}>⇔</div>
+
+      {/* Labels */}
+      <div style={{
+        position: "absolute", bottom: 14, left: 14,
+        background: "rgba(0,0,0,0.7)", borderRadius: 6, padding: "4px 10px",
+        fontSize: 10, color: "#fff", letterSpacing: 2, textTransform: "uppercase",
+      }}>Before</div>
+      <div style={{
+        position: "absolute", bottom: 14, right: 14,
+        background: `${T.purple}CC`, borderRadius: 6, padding: "4px 10px",
+        fontSize: 10, color: "#fff", letterSpacing: 2, textTransform: "uppercase",
+      }}>✦ MIRRA</div>
+    </div>
+  );
+}
+
 export default function App() {
   const [step, setStep] = useState("hero");
   const [photoUrl, setPhotoUrl] = useState(null);
@@ -156,6 +216,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState("hair");
   const [history, setHistory] = useState([]);
+  const [showSlider, setShowSlider] = useState(false);
   const fileRef = useRef();
 
   const handleFile = useCallback(async (file) => {
@@ -185,6 +246,7 @@ export default function App() {
     if (!selectedHair || !selectedOutfit) return;
     setStep("generating");
     setError(null);
+    setShowSlider(false);
     const gender = personData?.gender || "person";
     const skinTone = personData?.skinTone || "rich deep brown skin";
     const bodyBuild = personData?.bodyBuild || "";
@@ -214,6 +276,7 @@ export default function App() {
     setSelectedOutfit(null);
     setGeneratedImage(null);
     setError(null);
+    setShowSlider(false);
   };
 
   const hair = HAIRSTYLES.find(h => h.id === selectedHair);
@@ -342,7 +405,6 @@ export default function App() {
                   <div key={s.step} style={{
                     background: T.card, border: `1px solid ${T.border}`,
                     borderRadius: 16, padding: "24px 20px", textAlign: "left",
-                    transition: "all 0.2s",
                   }}>
                     <div style={{ fontSize: 24, marginBottom: 10 }}>{s.icon}</div>
                     <div style={{ fontSize: 9, letterSpacing: 4, color: T.purple, textTransform: "uppercase", marginBottom: 6 }}>Step {s.step}</div>
@@ -528,23 +590,43 @@ export default function App() {
         {/* RESULT */}
         {step === "result" && generatedImage && (
           <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 28, background: "#050302" }}>
-              <div style={{ position: "relative", maxWidth: 440, width: "100%" }}>
-                <img src={generatedImage} alt="generated look" style={{
-                  width: "100%", borderRadius: 18, border: `1px solid ${T.border}`,
-                  boxShadow: `0 40px 80px #000`,
-                }} />
-                <div style={{
-                  position: "absolute", bottom: 14, left: 14,
-                  background: `${T.bg}E8`, borderRadius: 8, padding: "8px 14px",
-                  border: `1px solid ${T.border}`,
-                }}>
-                  <div style={{ fontSize: 9, color: T.purple, letterSpacing: 3, textTransform: "uppercase" }}>
-                    {hair?.label} · {outfit?.label}
+            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 28, background: "#050302", overflow: "auto" }}>
+              <div style={{ maxWidth: 440, width: "100%" }}>
+                {showSlider && photoUrl ? (
+                  <BeforeAfterSlider beforeUrl={photoUrl} afterUrl={generatedImage} />
+                ) : (
+                  <div style={{ position: "relative" }}>
+                    <img src={generatedImage} alt="generated look" style={{
+                      width: "100%", borderRadius: 18, border: `1px solid ${T.border}`,
+                      boxShadow: `0 40px 80px #000`,
+                    }} />
+                    <div style={{
+                      position: "absolute", bottom: 14, left: 14,
+                      background: `${T.bg}E8`, borderRadius: 8, padding: "8px 14px",
+                      border: `1px solid ${T.border}`,
+                    }}>
+                      <div style={{ fontSize: 9, color: T.purple, letterSpacing: 3, textTransform: "uppercase" }}>
+                        {hair?.label} · {outfit?.label}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
+
+                {/* Before/After toggle */}
+                <button onClick={() => setShowSlider(s => !s)} style={{
+                  width: "100%", marginTop: 12,
+                  background: showSlider ? `${T.purple}22` : T.card,
+                  border: `1px solid ${showSlider ? T.purple : T.border}`,
+                  borderRadius: 10, padding: "10px",
+                  color: showSlider ? T.purpleLight : T.muted,
+                  fontSize: 10, letterSpacing: 3, cursor: "pointer",
+                  fontFamily: "inherit", textTransform: "uppercase",
+                }}>
+                  {showSlider ? "✦ Hide Comparison" : "⇔ Before / After"}
+                </button>
               </div>
             </div>
+
             <div style={{ width: 270, borderLeft: `1px solid ${T.border}`, display: "flex", flexDirection: "column", background: T.surface }}>
               <div style={{ padding: "20px 20px 0", flex: 1, overflow: "auto" }}>
                 <div style={{ fontSize: 9, letterSpacing: 4, color: T.purpleDim, textTransform: "uppercase", marginBottom: 8 }}>Your Look</div>
@@ -553,6 +635,16 @@ export default function App() {
                 <GoldDivider />
                 <h3 style={{ margin: "0 0 3px", fontSize: 18, fontWeight: 400 }}>{outfit?.label}</h3>
                 <p style={{ margin: "0 0 4px", color: T.muted, fontSize: 11 }}>{outfit?.desc}</p>
+
+                {/* Before thumbnail */}
+                {photoUrl && (
+                  <>
+                    <GoldDivider />
+                    <div style={{ fontSize: 9, letterSpacing: 4, color: T.purpleDim, textTransform: "uppercase", marginBottom: 8 }}>Before</div>
+                    <img src={photoUrl} style={{ width: "100%", borderRadius: 8, border: `1px solid ${T.border}`, objectFit: "cover", maxHeight: 120 }} />
+                  </>
+                )}
+
                 {history.length > 1 && (
                   <>
                     <GoldDivider />
@@ -563,7 +655,6 @@ export default function App() {
                           display: "flex", gap: 8, alignItems: "center",
                           cursor: "pointer", padding: 7, borderRadius: 8,
                           border: `1px solid ${T.border}`, background: T.card,
-                          transition: "all 0.2s",
                         }}>
                           <img src={h.url} style={{ width: 36, height: 46, objectFit: "cover", borderRadius: 5 }} />
                           <div>
