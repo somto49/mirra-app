@@ -88,9 +88,35 @@ app.post("/api/analyze", async (req, res) => {
   }
 });
 
-// ── Shared prompt builder ─────────────────────────────────────────────────────
+// ── Prompt builders ───────────────────────────────────────────────────────────
+
+// Base fashion model prompt — macro skin texture + dynamic expression + complex lighting
+function buildFashionModelPrompt(personPrompt, outfitHairPrompt) {
+  return [
+    // Subject
+    personPrompt,
+    outfitHairPrompt,
+
+    // 1. Macro-texture skin (raw, unretouched look)
+    "hyper-realistic macro skin texture showing visible pores, natural skin imperfections, micro-hairs on skin surface, natural hydration sheen, visible capillary details near the eyes, raw unretouched skin, subsurface scattering on cheeks and lips where light passes through skin creating warm glow",
+
+    // 2. Dynamic expression (warm engagement, not blank)
+    "subtle warm genuine engagement in the eyes, a natural smize with micro-tension in lower eyelids, slight relaxation in the brow, human natural expression with inner life and depth, not a blank stare",
+
+    // 3. Complex lighting physics
+    "short lighting technique with raking side light sculpting facial structure, high contrast directional light emphasizing bone structure, distinct sharp catchlights in pupils, cinematic lens flare, deep focus luxury fashion showroom background",
+
+    // 4. Hair quality
+    "individual hair strands visible, realistic hair texture and volume, true-to-life 4C coil pattern definition, natural hair movement",
+
+    // 5. Technical
+    "shot on Phase One IQ4 150MP medium format camera, 85mm f/1.4 lens, shallow depth of field, high resolution macro photography, 8k uhd, professional fashion editorial photography, Vogue magazine quality, masterpiece",
+  ].join(", ");
+}
+
+// Fallback prompt for HuggingFace
 function buildRealisticPrompt(prompt) {
-  return `RAW photo, ${prompt}, natural skin texture, visible skin pores, realistic hair strands, true-to-life fabric drape, shot on Canon EOS R5, 85mm f/1.8 lens, soft diffused studio lighting, catchlights in eyes, high fashion editorial photography, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
+  return `RAW photo, ${prompt}, hyper-realistic skin texture, visible pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, short lighting, catchlights in eyes, cinematic, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
 }
 
 // ── Helper: poll Replicate until done ────────────────────────────────────────
@@ -123,9 +149,8 @@ async function generateFashionModel(prompt, personData) {
   const bodyBuild = personData?.bodyBuild || "athletic build";
   const ageRange = personData?.ageRange || "";
 
-  const fashionPrompt = buildRealisticPrompt(
-    `a ${ageRange} ${gender}, ${skinTone}, ${bodyBuild}, ${prompt}, luxury fashion showroom background`
-  );
+  const personPrompt = `a ${ageRange} ${gender}, ${skinTone} skin, ${bodyBuild}`;
+  const fashionPrompt = buildFashionModelPrompt(personPrompt, prompt);
 
   console.log("[Step 1] Generating fashion model with FLUX...");
 
@@ -139,12 +164,12 @@ async function generateFashionModel(prompt, personData) {
     body: JSON.stringify({
       input: {
         prompt: fashionPrompt,
-        num_inference_steps: 28,
-        guidance_scale: 3.5,
+        num_inference_steps: 35,
+        guidance_scale: 4.0,
         width: 768,
         height: 1024,
         output_format: "jpg",
-        output_quality: 95,
+        output_quality: 97,
       },
     }),
   });
@@ -159,13 +184,12 @@ async function generateFashionModel(prompt, personData) {
   return await pollReplicate(prediction.id, REPLICATE_TOKEN);
 }
 
-// ── Step 2: Swap face using cdingram/face-swap (higher quality) ───────────────
+// ── Step 2: Swap face ─────────────────────────────────────────────────────────
 async function swapFace(sourceImageBase64, targetImageUrl) {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 
   console.log("[Step 2] Swapping face onto fashion model...");
 
-  // Try cdingram/face-swap first (higher quality)
   const models = [
     {
       url: "https://api.replicate.com/v1/models/cdingram/face-swap/predictions",
@@ -236,15 +260,12 @@ app.post("/api/generate", async (req, res) => {
 
   if (REPLICATE_TOKEN && imageBase64) {
     try {
-      // Step 1: Generate the fashion look
       const fashionModelUrl = await generateFashionModel(prompt, personData);
       console.log("[Step 1] Fashion model generated:", fashionModelUrl);
 
-      // Step 2: Swap the user's face onto it
       const finalImageUrl = await swapFace(imageBase64, fashionModelUrl);
       console.log("[Step 2] Face swap complete");
 
-      // Fetch final image and convert to base64
       const imgRes = await fetch(finalImageUrl);
       const buffer = await imgRes.arrayBuffer();
       const base64 = Buffer.from(buffer).toString("base64");
