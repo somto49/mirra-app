@@ -49,22 +49,20 @@ app.post("/api/analyze", async (req, res) => {
             content: [
               {
                 type: "image_url",
-                image_url: {
-                  url: `data:image/jpeg;base64,${imageBase64}`,
-                },
+                image_url: { url: `data:image/jpeg;base64,${imageBase64}` },
               },
               {
                 type: "text",
                 text: `You are an expert at analyzing human appearances for AI image generation. Study this person's face and body very carefully and return ONLY a valid JSON object — no markdown, no backticks, no extra text:
 {
-  "skinTone": "very precise skin tone e.g. deep ebony with cool undertones, rich dark brown with warm undertones, medium brown with golden undertones",
+  "skinTone": "very precise skin tone e.g. deep ebony with cool undertones, rich dark brown with warm undertones",
   "faceShape": "face shape e.g. oval, round, square, heart, oblong",
-  "facialFeatures": "very detailed facial features e.g. broad flat nose, full voluminous lips, strong squared jawline, prominent high cheekbones, deep-set dark brown almond-shaped eyes, thick arched eyebrows, smooth forehead",
-  "bodyBuild": "detailed body build e.g. broad shoulders, athletic muscular build, slim waist, curvy hips",
-  "gender": "woman or man",
-  "ageRange": "approximate age range e.g. mid 20s, early 30s",
+  "facialFeatures": "very detailed facial features e.g. broad flat nose, full lips, strong jawline, high cheekbones, dark brown eyes, thick eyebrows",
+  "bodyBuild": "detailed body build e.g. broad shoulders, athletic build, slim waist",
+  "gender": "woman or man or boy or girl",
+  "ageRange": "approximate age e.g. 12 years old, mid 20s, early 30s",
   "currentStyle": "one sentence about their current style",
-  "realisticVisionPrompt": "RAW photo, a [gender] in [age range], [skin tone] skin, [face shape] face, [detailed facial features], [body build], natural skin texture, skin pores visible, shot on Canon EOS R5, 85mm lens, f/1.8 aperture, soft natural window light, professional fashion portrait"
+  "realisticVisionPrompt": "RAW photo, a [exact age] [gender], [skin tone] skin, [face shape] face, [detailed facial features], [body build], natural skin texture, skin pores visible, shot on Canon EOS R5, 85mm lens, f/1.8 aperture, soft natural window light, professional fashion portrait"
 }`,
               },
             ],
@@ -92,56 +90,44 @@ app.post("/api/analyze", async (req, res) => {
 
 // ── Shared prompt builder ─────────────────────────────────────────────────────
 function buildRealisticPrompt(prompt) {
-  return `RAW photo, ${prompt}, natural skin texture, visible skin pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, shot on Canon EOS R5, 85mm f/1.8 lens, soft diffused studio lighting, catchlights in eyes, shallow depth of field, high fashion editorial photography, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
+  return `RAW photo, ${prompt}, natural skin texture, visible skin pores, realistic hair strands, true-to-life fabric drape, shot on Canon EOS R5, 85mm f/1.8 lens, soft diffused studio lighting, catchlights in eyes, high fashion editorial photography, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
 }
 
-function buildNegativePrompt() {
-  return "cartoon, anime, illustration, painting, drawing, CGI, 3d render, plastic skin, blurry face, disfigured, deformed, extra limbs, bad anatomy, watermark, signature, text, low quality, worst quality, jpeg artifacts, overexposed, underexposed, flat lighting";
+// ── Helper: poll Replicate until done ────────────────────────────────────────
+async function pollReplicate(predictionId, token, maxWait = 120000) {
+  const interval = 3000;
+  let waited = 0;
+  let prediction = { status: "starting" };
+
+  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
+    if (waited >= maxWait) throw new Error("Replicate timed out");
+    await new Promise(r => setTimeout(r, interval));
+    waited += interval;
+
+    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    prediction = await pollRes.json();
+  }
+
+  if (prediction.status === "failed") throw new Error(`Replicate failed: ${prediction.error}`);
+  return prediction.output?.[0] || prediction.output;
 }
 
-// ── GEMINI 2.5 FLASH IMAGE (primary — true photo editing) ────────────────────
-async function generateWithGemini(prompt, imageBase64) {
-  const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_KEY) throw new Error("GEMINI_API_KEY not set");
-
-  const enrichedPrompt = `Edit this exact photo realistically. Keep the person's face, identity, skin tone, and body completely unchanged — do not generate a new person. Only change their hairstyle and outfit to: ${prompt}. Requirements: photorealistic result, hyperrealistic skin texture with visible pores, realistic natural hair strand detail (especially 4C coil texture if applicable), true fabric drape and texture, professional fashion editorial photography, soft studio lighting, shot on 85mm lens, sharp facial details, true to life. Do not smooth or alter the face.`;
-
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${GEMINI_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: enrichedPrompt },
-            { inlineData: { mimeType: "image/jpeg", data: imageBase64 } }
-          ]
-        }]
-      })
-    }
-  );
-
-  const data = await response.json();
-  if (data.error) throw new Error(`Gemini ${response.status}: ${data.error.message}`);
-
-  const parts = data.candidates?.[0]?.content?.parts || [];
-  const imagePart = parts.find(p => p.inlineData || p.inline_data);
-  const inline = imagePart?.inlineData || imagePart?.inline_data;
-  if (!inline?.data) throw new Error("No image returned from Gemini — model may have declined");
-
-  const mime = inline.mimeType || inline.mime_type || "image/png";
-  return `data:${mime};base64,${inline.data}`;
-}
-
-// ── REPLICATE img2img (secondary fallback) ────────────────────────────────────
-async function generateWithReplicate(prompt, imageBase64) {
+// ── Step 1: Generate fashion model with FLUX ──────────────────────────────────
+async function generateFashionModel(prompt, personData) {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
-  if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
 
-  const enrichedPrompt = buildRealisticPrompt(
-    `keeping the exact face and skin tone from the reference image, ${prompt}`
+  const gender = personData?.gender || "person";
+  const skinTone = personData?.skinTone || "deep dark brown skin";
+  const bodyBuild = personData?.bodyBuild || "athletic build";
+  const ageRange = personData?.ageRange || "";
+
+  const fashionPrompt = buildRealisticPrompt(
+    `a ${ageRange} ${gender}, ${skinTone}, ${bodyBuild}, ${prompt}, luxury fashion showroom background`
   );
+
+  console.log("[Step 1] Generating fashion model with FLUX...");
 
   const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
     method: "POST",
@@ -152,154 +138,156 @@ async function generateWithReplicate(prompt, imageBase64) {
     },
     body: JSON.stringify({
       input: {
-        prompt: enrichedPrompt,
-        image: `data:image/jpeg;base64,${imageBase64}`,
-        prompt_strength: 0.70,   // lower = more face preservation
-        num_inference_steps: 30,
-        guidance_scale: 4.0,
+        prompt: fashionPrompt,
+        num_inference_steps: 28,
+        guidance_scale: 3.5,
         width: 768,
         height: 1024,
-        output_format: "jpeg",
-        output_quality: 92,
+        output_format: "jpg",
+        output_quality: 95,
       },
     }),
   });
 
   if (!startRes.ok) {
     const err = await startRes.text();
-    throw new Error(`Replicate start failed: ${err.slice(0, 200)}`);
+    throw new Error(`FLUX start failed: ${err.slice(0, 200)}`);
   }
 
-  let prediction = await startRes.json();
-
-  const maxWait = 90000;
-  const interval = 3000;
-  let waited = 0;
-
-  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
-    if (waited >= maxWait) throw new Error("Replicate timed out after 90 seconds");
-    await new Promise(r => setTimeout(r, interval));
-    waited += interval;
-
-    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
-      headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` },
-    });
-    prediction = await pollRes.json();
-  }
-
-  if (prediction.status === "failed") {
-    throw new Error(`Replicate generation failed: ${prediction.error}`);
-  }
-
-  const imageUrl = prediction.output?.[0] || prediction.output;
-  if (!imageUrl) throw new Error("No image in Replicate response");
-
-  const imgRes = await fetch(imageUrl);
-  const buffer = await imgRes.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  return `data:image/jpeg;base64,${base64}`;
+  const prediction = await startRes.json();
+  if (prediction.status === "succeeded") return prediction.output?.[0] || prediction.output;
+  return await pollReplicate(prediction.id, REPLICATE_TOKEN);
 }
 
-// ── HUGGINGFACE — Realistic Vision v6 (final fallback, much better than FLUX-schnell) ──
-async function generateWithHuggingFace(prompt) {
-  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
-  if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
+// ── Step 2: Swap face using cdingram/face-swap (higher quality) ───────────────
+async function swapFace(sourceImageBase64, targetImageUrl) {
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 
-  const enrichedPrompt = buildRealisticPrompt(prompt);
-  const negativePrompt = buildNegativePrompt();
+  console.log("[Step 2] Swapping face onto fashion model...");
 
-  // Try Realistic Vision v6 first — fine-tuned for human portraiture
+  // Try cdingram/face-swap first (higher quality)
   const models = [
-    "SG161222/Realistic_Vision_V6.0_B1_noVAE",
-    "emilianJR/epiCRealism",
-    "black-forest-labs/FLUX.1-dev",  // better than schnell if above fail
-    "black-forest-labs/FLUX.1-schnell", // last resort
+    {
+      url: "https://api.replicate.com/v1/models/cdingram/face-swap/predictions",
+      input: {
+        target_image: targetImageUrl,
+        source_image: `data:image/jpeg;base64,${sourceImageBase64}`,
+      },
+    },
+    {
+      url: "https://api.replicate.com/v1/models/lucataco/faceswap/predictions",
+      input: {
+        target_image: targetImageUrl,
+        swap_image: `data:image/jpeg;base64,${sourceImageBase64}`,
+      },
+    },
   ];
 
   for (const model of models) {
     try {
-      console.log(`[HuggingFace] Trying model: ${model}`);
-      const response = await fetch(
-        `https://router.huggingface.co/hf-inference/models/${model}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${HF_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            inputs: enrichedPrompt,
-            parameters: {
-              negative_prompt: negativePrompt,
-              num_inference_steps: model.includes("schnell") ? 8 : 25,
-              width: 512,
-              height: 768,
-              guidance_scale: 7.0,
-              scheduler: "DPMSolverMultistepScheduler",
-            }
-          })
-        }
-      );
+      const startRes = await fetch(model.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${REPLICATE_TOKEN}`,
+          "Content-Type": "application/json",
+          "Prefer": "wait=60",
+        },
+        body: JSON.stringify({ input: model.input }),
+      });
 
-      if (response.status === 503) {
-        console.log(`[HuggingFace] ${model} warming up, trying next...`);
+      if (!startRes.ok) {
+        const err = await startRes.text();
+        console.log(`[Step 2] Model failed: ${err.slice(0, 100)}, trying next...`);
         continue;
       }
 
-      if (!response.ok) {
-        const errText = await response.text();
-        console.log(`[HuggingFace] ${model} failed: ${errText.slice(0, 100)}, trying next...`);
-        continue;
+      const prediction = await startRes.json();
+      let outputUrl;
+
+      if (prediction.status === "succeeded") {
+        outputUrl = prediction.output?.[0] || prediction.output;
+      } else {
+        outputUrl = await pollReplicate(prediction.id, REPLICATE_TOKEN);
       }
 
-      const buffer = await response.arrayBuffer();
-      const base64 = Buffer.from(buffer).toString("base64");
-      console.log(`[HuggingFace] Success with model: ${model}`);
-      return `data:image/jpeg;base64,${base64}`;
-
+      if (outputUrl) {
+        console.log("[Step 2] Face swap succeeded!");
+        return outputUrl;
+      }
     } catch (err) {
-      console.log(`[HuggingFace] ${model} error: ${err.message}, trying next...`);
+      console.log(`[Step 2] Error: ${err.message}, trying next...`);
       continue;
     }
   }
 
-  throw new Error("All HuggingFace models failed or are unavailable");
+  throw new Error("All face swap models failed");
 }
 
-// ── /api/generate — Gemini → Replicate → HuggingFace Realistic Vision ────────
+// ── /api/generate — Two-step: FLUX + FaceSwap ────────────────────────────────
 app.post("/api/generate", async (req, res) => {
-  const { prompt, imageBase64 } = req.body;
+  const { prompt, imageBase64, personData } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
-  // 1. Gemini — best for true photo editing (keeps exact face)
-  if (process.env.GEMINI_API_KEY && imageBase64) {
+  console.log("[/api/generate] prompt length:", prompt?.length);
+  console.log("[/api/generate] imageBase64 present:", !!imageBase64);
+  console.log("[/api/generate] REPLICATE_API_TOKEN present:", !!process.env.REPLICATE_API_TOKEN);
+
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
+
+  if (REPLICATE_TOKEN && imageBase64) {
     try {
-      console.log("[/api/generate] Trying Gemini 2.5 Flash Image...");
-      const image = await generateWithGemini(prompt, imageBase64);
-      return res.json({ image, source: "gemini" });
+      // Step 1: Generate the fashion look
+      const fashionModelUrl = await generateFashionModel(prompt, personData);
+      console.log("[Step 1] Fashion model generated:", fashionModelUrl);
+
+      // Step 2: Swap the user's face onto it
+      const finalImageUrl = await swapFace(imageBase64, fashionModelUrl);
+      console.log("[Step 2] Face swap complete");
+
+      // Fetch final image and convert to base64
+      const imgRes = await fetch(finalImageUrl);
+      const buffer = await imgRes.arrayBuffer();
+      const base64 = Buffer.from(buffer).toString("base64");
+      return res.json({ image: `data:image/jpeg;base64,${base64}`, source: "faceswap" });
+
     } catch (err) {
-      console.error("[/api/generate] Gemini failed:", err.message);
+      console.error("[/api/generate] Two-step failed:", err.message);
     }
   }
 
-  // 2. Replicate — img2img with photo reference
-  if (process.env.REPLICATE_API_TOKEN && imageBase64) {
-    try {
-      console.log("[/api/generate] Trying Replicate img2img...");
-      const image = await generateWithReplicate(prompt, imageBase64);
-      return res.json({ image, source: "replicate" });
-    } catch (err) {
-      console.error("[/api/generate] Replicate failed:", err.message);
-    }
-  }
-
-  // 3. HuggingFace — Realistic Vision v6 (much better than FLUX-schnell)
+  // Fallback — HuggingFace FLUX.1-schnell
   try {
-    console.log("[/api/generate] Using HuggingFace Realistic Vision...");
-    const image = await generateWithHuggingFace(prompt);
-    return res.json({ image, source: "huggingface" });
+    console.log("[/api/generate] Using HuggingFace fallback...");
+    const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
+    if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
+
+    const enrichedPrompt = buildRealisticPrompt(prompt);
+    const response = await fetch(
+      "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${HF_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: enrichedPrompt,
+          parameters: { num_inference_steps: 8, width: 768, height: 1024, guidance_scale: 0 }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`HuggingFace ${response.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    return res.json({ image: `data:image/jpeg;base64,${base64}`, source: "huggingface" });
+
   } catch (err) {
-    console.error("[/api/generate] All generation methods failed:", err.message);
+    console.error("[/api/generate] All methods failed:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
