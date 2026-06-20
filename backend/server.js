@@ -90,33 +90,25 @@ app.post("/api/analyze", async (req, res) => {
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
-// Base fashion model prompt — macro skin texture + dynamic expression + complex lighting
 function buildFashionModelPrompt(personPrompt, outfitHairPrompt) {
   return [
-    // Subject
     personPrompt,
     outfitHairPrompt,
-
-    // 1. Macro-texture skin (raw, unretouched look)
     "hyper-realistic macro skin texture showing visible pores, natural skin imperfections, micro-hairs on skin surface, natural hydration sheen, visible capillary details near the eyes, raw unretouched skin, subsurface scattering on cheeks and lips where light passes through skin creating warm glow",
-
-    // 2. Dynamic expression (warm engagement, not blank)
     "subtle warm genuine engagement in the eyes, a natural smize with micro-tension in lower eyelids, slight relaxation in the brow, human natural expression with inner life and depth, not a blank stare",
-
-    // 3. Complex lighting physics
     "short lighting technique with raking side light sculpting facial structure, high contrast directional light emphasizing bone structure, distinct sharp catchlights in pupils, cinematic lens flare, deep focus luxury fashion showroom background",
-
-    // 4. Hair quality
     "individual hair strands visible, realistic hair texture and volume, true-to-life 4C coil pattern definition, natural hair movement",
-
-    // 5. Technical
     "shot on Phase One IQ4 150MP medium format camera, 85mm f/1.4 lens, shallow depth of field, high resolution macro photography, 8k uhd, professional fashion editorial photography, Vogue magazine quality, masterpiece",
   ].join(", ");
 }
 
-// Fallback prompt for HuggingFace
 function buildRealisticPrompt(prompt) {
   return `RAW photo, ${prompt}, hyper-realistic skin texture, visible pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, short lighting, catchlights in eyes, cinematic, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
+}
+
+// Img2img-specific prompt for ModelsLab — instructs the model to edit the person directly
+function buildImg2ImgPrompt(prompt) {
+  return `Keep the exact same person, face, identity, and skin tone from the reference photo. Change only their hairstyle and outfit to: ${prompt}. Photorealistic, hyper-realistic skin texture, visible pores, natural hair strands, true-to-life fabric drape, professional fashion editorial photography, studio lighting, 8k uhd, masterpiece, best quality`;
 }
 
 // ── Helper: poll Replicate until done ────────────────────────────────────────
@@ -140,7 +132,97 @@ async function pollReplicate(predictionId, token, maxWait = 120000) {
   return prediction.output?.[0] || prediction.output;
 }
 
-// ── Step 1: Generate fashion model with FLUX ──────────────────────────────────
+// ── PRIMARY: ModelsLab img2img — true photo editing, free tier ───────────────
+async function generateWithModelsLab(prompt, imageBase64) {
+  const MODELSLAB_KEY = process.env.MODELSLAB_API_KEY;
+  if (!MODELSLAB_KEY) throw new Error("MODELSLAB_API_KEY not set");
+
+  const enrichedPrompt = buildImg2ImgPrompt(prompt);
+
+  console.log("[ModelsLab] Trying img2img with flux-kontext-dev...");
+
+  const response = await fetch("https://modelslab.com/api/v6/images/img2img", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      key: MODELSLAB_KEY,
+      model_id: "flux-kontext-dev",
+      prompt: enrichedPrompt,
+      negative_prompt: "cartoon, anime, illustration, painting, unrealistic, blurry, distorted face, changed face, different person, deformed, low quality",
+      init_image: `data:image/jpeg;base64,${imageBase64}`,
+      width: "768",
+      height: "1024",
+      samples: "1",
+      strength: 0.5,
+      guidance_scale: 7.5,
+      num_inference_steps: 31,
+      safety_checker: false,
+      base64: false,
+      seed: null,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`ModelsLab HTTP ${response.status}: ${errText.slice(0, 300)}`);
+  }
+
+  const data = await response.json();
+
+  if (data.status === "error") {
+    throw new Error(`ModelsLab error: ${data.message || JSON.stringify(data).slice(0, 200)}`);
+  }
+
+  // Queued — poll the fetch endpoint until ready
+  if (data.status === "processing") {
+    console.log("[ModelsLab] Queued, polling for result...");
+    const reqId = data.id;
+    const maxWait = 90000;
+    const interval = 3000;
+    let waited = 0;
+    let outputUrl = null;
+
+    while (waited < maxWait) {
+      await new Promise(r => setTimeout(r, interval));
+      waited += interval;
+
+      const fetchRes = await fetch(`https://modelslab.com/api/v6/images/fetch/${reqId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: MODELSLAB_KEY }),
+      });
+      const fetchData = await fetchRes.json();
+
+      if (fetchData.status === "success") {
+        outputUrl = fetchData.output?.[0] || fetchData.output;
+        break;
+      }
+      if (fetchData.status === "error") {
+        throw new Error(`ModelsLab fetch error: ${fetchData.message || "unknown"}`);
+      }
+    }
+
+    if (!outputUrl) throw new Error("ModelsLab timed out while processing");
+    const imgRes = await fetch(outputUrl);
+    const buffer = await imgRes.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    return `data:image/jpeg;base64,${base64}`;
+  }
+
+  // Immediate success
+  if (data.status === "success") {
+    const outputUrl = data.output?.[0] || data.output;
+    if (!outputUrl) throw new Error("No image in ModelsLab response");
+    const imgRes = await fetch(outputUrl);
+    const buffer = await imgRes.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    return `data:image/jpeg;base64,${base64}`;
+  }
+
+  throw new Error(`ModelsLab unexpected response status: ${data.status}`);
+}
+
+// ── FALLBACK 1: Replicate two-step — FLUX fashion model + faceswap ───────────
 async function generateFashionModel(prompt, personData) {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 
@@ -184,7 +266,6 @@ async function generateFashionModel(prompt, personData) {
   return await pollReplicate(prediction.id, REPLICATE_TOKEN);
 }
 
-// ── Step 2: Swap face ─────────────────────────────────────────────────────────
 async function swapFace(sourceImageBase64, targetImageUrl) {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 
@@ -247,17 +328,29 @@ async function swapFace(sourceImageBase64, targetImageUrl) {
   throw new Error("All face swap models failed");
 }
 
-// ── /api/generate — Two-step: FLUX + FaceSwap ────────────────────────────────
+// ── /api/generate — ModelsLab → Replicate two-step → HuggingFace ─────────────
 app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64, personData } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
   console.log("[/api/generate] prompt length:", prompt?.length);
   console.log("[/api/generate] imageBase64 present:", !!imageBase64);
+  console.log("[/api/generate] MODELSLAB_API_KEY present:", !!process.env.MODELSLAB_API_KEY);
   console.log("[/api/generate] REPLICATE_API_TOKEN present:", !!process.env.REPLICATE_API_TOKEN);
 
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
+  // ── PRIMARY: ModelsLab img2img ──────────────────────────────────────────
+  if (process.env.MODELSLAB_API_KEY && imageBase64) {
+    try {
+      const image = await generateWithModelsLab(prompt, imageBase64);
+      console.log("[/api/generate] ModelsLab succeeded!");
+      return res.json({ image, source: "modelslab" });
+    } catch (err) {
+      console.error("[/api/generate] ModelsLab failed:", err.message);
+    }
+  }
 
+  // ── FALLBACK 1: Replicate two-step (FLUX + FaceSwap) ────────────────────
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
   if (REPLICATE_TOKEN && imageBase64) {
     try {
       const fashionModelUrl = await generateFashionModel(prompt, personData);
@@ -276,7 +369,7 @@ app.post("/api/generate", async (req, res) => {
     }
   }
 
-  // Fallback — HuggingFace FLUX.1-schnell
+  // ── FALLBACK 2: HuggingFace FLUX.1-schnell (text-only) ───────────────────
   try {
     console.log("[/api/generate] Using HuggingFace fallback...");
     const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
