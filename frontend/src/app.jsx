@@ -128,11 +128,11 @@ async function analyzePhoto(imageBase64) {
   return data;
 }
 
-async function generateLook(prompt, imageBase64) {
+async function generateLook(prompt, imageBase64, outfitId, personData) {
   const res = await fetch(`${API_URL}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, imageBase64 }),
+    body: JSON.stringify({ prompt, imageBase64, outfitId, personData }),
   });
   const data = await res.json();
   if (data.error) throw new Error(data.error);
@@ -282,7 +282,7 @@ export default function App() {
     const base = personData?.fluxPromptBase || "A beautiful person,";
     const prompt = `${base} ${OUTFIT_PROMPTS[selectedOutfit]}, ${HAIR_PROMPTS[selectedHair]}, professional fashion photography, editorial lighting, luxury magazine shoot, sharp focus, photorealistic, 8k`;
     try {
-      const url = await generateLook(prompt, photoBase64);
+      const url = await generateLook(prompt, photoBase64, selectedOutfit, personData);
       setGeneratedImage(url);
       const hair = HAIRSTYLES.find(h => h.id === selectedHair);
       const outfit = OUTFITS.find(o => o.id === selectedOutfit);
