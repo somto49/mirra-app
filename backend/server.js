@@ -24,6 +24,16 @@ app.get("/", (req, res) => {
   res.json({ status: "✦ MIRRA API is live" });
 });
 
+// ── Garment image library — confirmed free Pexels stock photos ──────────────
+// TEST SET: only these 3 outfits are wired to real garment images right now.
+// Remaining outfits will fall through to the prompt-only pipeline until more
+// garment images are sourced.
+const GARMENT_IMAGES = {
+  gala: "https://images.pexels.com/photos/33665482/pexels-photo-33665482.jpeg?cs=srgb&fm=jpg",
+  business: "https://images.pexels.com/photos/10419116/pexels-photo-10419116.jpeg?cs=srgb&fm=jpg",
+  street: "https://images.pexels.com/photos/17474220/pexels-photo-17474220.jpeg?cs=srgb&fm=jpg",
+};
+
 // ── /api/analyze — Groq photo analysis ───────────────────────────────────────
 app.post("/api/analyze", async (req, res) => {
   const { imageBase64 } = req.body;
@@ -106,11 +116,6 @@ function buildRealisticPrompt(prompt) {
   return `RAW photo, ${prompt}, hyper-realistic skin texture, visible pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, short lighting, catchlights in eyes, cinematic, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
 }
 
-// Img2img-specific prompt for ModelsLab — instructs the model to edit the person directly
-function buildImg2ImgPrompt(prompt) {
-  return `Keep the exact same person, face, identity, and skin tone from the reference photo. Change only their hairstyle and outfit to: ${prompt}. Photorealistic, hyper-realistic skin texture, visible pores, natural hair strands, true-to-life fabric drape, professional fashion editorial photography, studio lighting, 8k uhd, masterpiece, best quality`;
-}
-
 // ── Helper: poll Replicate until done ────────────────────────────────────────
 async function pollReplicate(predictionId, token, maxWait = 120000) {
   const interval = 3000;
@@ -132,94 +137,96 @@ async function pollReplicate(predictionId, token, maxWait = 120000) {
   return prediction.output?.[0] || prediction.output;
 }
 
-// ── PRIMARY: ModelsLab img2img — true photo editing, free tier ───────────────
-async function generateWithModelsLab(prompt, imageBase64) {
-  const MODELSLAB_KEY = process.env.MODELSLAB_API_KEY;
-  if (!MODELSLAB_KEY) throw new Error("MODELSLAB_API_KEY not set");
+// ── PRIMARY: free IDM-VTON HuggingFace Space (yisol/IDM-VTON) ────────────────
+// Calls the Gradio REST API directly (submit -> poll) since this is Node, not
+// Python, so the official gradio_client library can't be used.
+// This is a FREE shared-GPU community Space — it can be slow, queued, or
+// occasionally down since nobody is paying to keep it always-on.
+async function generateWithIDMVTON(garmentImageUrl, personImageBase64, garmentDescription) {
+  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN; // optional but helps with rate limits
+  const SPACE_BASE = "https://yisol-idm-vton.hf.space";
 
-  const enrichedPrompt = buildImg2ImgPrompt(prompt);
+  console.log("[IDM-VTON] Fetching garment image...");
+  const garmentRes = await fetch(garmentImageUrl);
+  if (!garmentRes.ok) throw new Error(`Failed to fetch garment image: ${garmentRes.status}`);
+  const garmentBuffer = await garmentRes.arrayBuffer();
+  const garmentBase64 = Buffer.from(garmentBuffer).toString("base64");
 
-  console.log("[ModelsLab] Trying img2img with flux-kontext-dev...");
+  console.log("[IDM-VTON] Submitting tryon job...");
 
-  const response = await fetch("https://modelslab.com/api/v6/images/img2img", {
+  const submitRes = await fetch(`${SPACE_BASE}/gradio_api/call/tryon`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {}),
+    },
     body: JSON.stringify({
-      key: MODELSLAB_KEY,
-      model_id: "flux-kontext-dev",
-      prompt: enrichedPrompt,
-      negative_prompt: "cartoon, anime, illustration, painting, unrealistic, blurry, distorted face, changed face, different person, deformed, low quality",
-      init_image: `data:image/jpeg;base64,${imageBase64}`,
-      width: "768",
-      height: "1024",
-      samples: "1",
-      strength: 0.5,
-      guidance_scale: 7.5,
-      num_inference_steps: 31,
-      safety_checker: false,
-      base64: false,
-      seed: null,
+      data: [
+        { background: `data:image/jpeg;base64,${personImageBase64}`, layers: [], composite: null },
+        `data:image/jpeg;base64,${garmentBase64}`,
+        garmentDescription || "",
+        true,   // is_checked (auto-mask)
+        false,  // is_checked_crop
+        30,     // denoise_steps
+        42,     // seed
+      ],
     }),
   });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`ModelsLab HTTP ${response.status}: ${errText.slice(0, 300)}`);
+  if (!submitRes.ok) {
+    const errText = await submitRes.text();
+    throw new Error(`IDM-VTON submit failed: HTTP ${submitRes.status}: ${errText.slice(0, 200)}`);
   }
 
-  const data = await response.json();
+  const submitData = await submitRes.json();
+  const eventId = submitData.event_id;
+  if (!eventId) throw new Error("IDM-VTON: no event_id returned");
 
-  if (data.status === "error") {
-    throw new Error(`ModelsLab error: ${data.message || JSON.stringify(data).slice(0, 200)}`);
-  }
+  console.log("[IDM-VTON] Polling for result, event:", eventId);
 
-  // Queued — poll the fetch endpoint until ready
-  if (data.status === "processing") {
-    console.log("[ModelsLab] Queued, polling for result...");
-    const reqId = data.id;
-    const maxWait = 90000;
-    const interval = 3000;
-    let waited = 0;
-    let outputUrl = null;
+  // Poll the event stream endpoint until it completes
+  const maxWait = 120000; // free Space can be slow under load
+  const interval = 3000;
+  let waited = 0;
 
-    while (waited < maxWait) {
-      await new Promise(r => setTimeout(r, interval));
-      waited += interval;
+  while (waited < maxWait) {
+    await new Promise(r => setTimeout(r, interval));
+    waited += interval;
 
-      const fetchRes = await fetch(`https://modelslab.com/api/v6/images/fetch/${reqId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: MODELSLAB_KEY }),
-      });
-      const fetchData = await fetchRes.json();
+    const resultRes = await fetch(`${SPACE_BASE}/gradio_api/call/tryon/${eventId}`, {
+      headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {},
+    });
 
-      if (fetchData.status === "success") {
-        outputUrl = fetchData.output?.[0] || fetchData.output;
-        break;
+    if (!resultRes.ok) continue; // not ready yet, keep polling
+
+    const text = await resultRes.text();
+    // Gradio streams SSE-style lines like "event: complete\ndata: [...]"
+    if (text.includes("event: complete") || text.includes('"msg":"process_completed"')) {
+      const dataLineMatch = text.match(/data:\s*(\[.*\])/s);
+      if (dataLineMatch) {
+        const parsed = JSON.parse(dataLineMatch[1]);
+        // Output is typically [{ image: { url, path, ... } }, "status message"]
+        const imageOutput = parsed[0];
+        const imageUrl = imageOutput?.url || imageOutput?.path || imageOutput;
+        if (imageUrl) {
+          console.log("[IDM-VTON] Result ready!");
+          const fullUrl = imageUrl.startsWith("http") ? imageUrl : `${SPACE_BASE}/file=${imageUrl}`;
+          const imgRes = await fetch(fullUrl, { headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {} });
+          const buffer = await imgRes.arrayBuffer();
+          const base64 = Buffer.from(buffer).toString("base64");
+          return `data:image/jpeg;base64,${base64}`;
+        }
       }
-      if (fetchData.status === "error") {
-        throw new Error(`ModelsLab fetch error: ${fetchData.message || "unknown"}`);
-      }
+      throw new Error("IDM-VTON: completed but no image found in response");
     }
 
-    if (!outputUrl) throw new Error("ModelsLab timed out while processing");
-    const imgRes = await fetch(outputUrl);
-    const buffer = await imgRes.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString("base64");
-    return `data:image/jpeg;base64,${base64}`;
+    if (text.includes("event: error") || text.includes('"msg":"process_completed_error"')) {
+      throw new Error(`IDM-VTON processing error: ${text.slice(0, 200)}`);
+    }
+    // otherwise: still queued/processing, keep polling
   }
 
-  // Immediate success
-  if (data.status === "success") {
-    const outputUrl = data.output?.[0] || data.output;
-    if (!outputUrl) throw new Error("No image in ModelsLab response");
-    const imgRes = await fetch(outputUrl);
-    const buffer = await imgRes.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString("base64");
-    return `data:image/jpeg;base64,${base64}`;
-  }
-
-  throw new Error(`ModelsLab unexpected response status: ${data.status}`);
+  throw new Error("IDM-VTON timed out — free Space may be overloaded or queued");
 }
 
 // ── FALLBACK 1: Replicate two-step — FLUX fashion model + faceswap ───────────
@@ -328,24 +335,24 @@ async function swapFace(sourceImageBase64, targetImageUrl) {
   throw new Error("All face swap models failed");
 }
 
-// ── /api/generate — ModelsLab → Replicate two-step → HuggingFace ─────────────
+// ── /api/generate — IDM-VTON (free) → Replicate two-step → HuggingFace ───────
 app.post("/api/generate", async (req, res) => {
-  const { prompt, imageBase64, personData } = req.body;
+  const { prompt, imageBase64, personData, outfitId } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
 
   console.log("[/api/generate] prompt length:", prompt?.length);
   console.log("[/api/generate] imageBase64 present:", !!imageBase64);
-  console.log("[/api/generate] MODELSLAB_API_KEY present:", !!process.env.MODELSLAB_API_KEY);
-  console.log("[/api/generate] REPLICATE_API_TOKEN present:", !!process.env.REPLICATE_API_TOKEN);
+  console.log("[/api/generate] outfitId:", outfitId);
+  console.log("[/api/generate] garment image available:", !!GARMENT_IMAGES[outfitId]);
 
-  // ── PRIMARY: ModelsLab img2img ──────────────────────────────────────────
-  if (process.env.MODELSLAB_API_KEY && imageBase64) {
+  // ── PRIMARY: IDM-VTON free Space — only if this outfit has a garment image ─
+  if (imageBase64 && outfitId && GARMENT_IMAGES[outfitId]) {
     try {
-      const image = await generateWithModelsLab(prompt, imageBase64);
-      console.log("[/api/generate] ModelsLab succeeded!");
-      return res.json({ image, source: "modelslab" });
+      const image = await generateWithIDMVTON(GARMENT_IMAGES[outfitId], imageBase64, prompt);
+      console.log("[/api/generate] IDM-VTON succeeded!");
+      return res.json({ image, source: "idm-vton" });
     } catch (err) {
-      console.error("[/api/generate] ModelsLab failed:", err.message);
+      console.error("[/api/generate] IDM-VTON failed:", err.message);
     }
   }
 
