@@ -140,21 +140,22 @@ async function pollReplicate(predictionId, token, maxWait = 120000) {
 // ── PRIMARY: free IDM-VTON HuggingFace Space (yisol/IDM-VTON) ────────────────
 // Calls the Gradio REST API directly (submit -> poll) since this is Node, not
 // Python, so the official gradio_client library can't be used.
+// Confirmed endpoint pattern (Gradio's own curl docs):
+//   POST {space}/call/{api_name}          -> { event_id }
+//   GET  {space}/call/{api_name}/{event_id} -> SSE stream, "event: complete"
+// File-type inputs are passed as { "path": "<url-or-data-uri>" }, not raw
+// base64 strings.
 // This is a FREE shared-GPU community Space — it can be slow, queued, or
 // occasionally down since nobody is paying to keep it always-on.
 async function generateWithIDMVTON(garmentImageUrl, personImageBase64, garmentDescription) {
   const HF_TOKEN = process.env.HUGGINGFACE_TOKEN; // optional but helps with rate limits
   const SPACE_BASE = "https://yisol-idm-vton.hf.space";
 
-  console.log("[IDM-VTON] Fetching garment image...");
-  const garmentRes = await fetch(garmentImageUrl);
-  if (!garmentRes.ok) throw new Error(`Failed to fetch garment image: ${garmentRes.status}`);
-  const garmentBuffer = await garmentRes.arrayBuffer();
-  const garmentBase64 = Buffer.from(garmentBuffer).toString("base64");
+  const personDataUri = `data:image/jpeg;base64,${personImageBase64}`;
 
   console.log("[IDM-VTON] Submitting tryon job...");
 
-  const submitRes = await fetch(`${SPACE_BASE}/gradio_api/call/tryon`, {
+  const submitRes = await fetch(`${SPACE_BASE}/call/tryon`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -162,8 +163,8 @@ async function generateWithIDMVTON(garmentImageUrl, personImageBase64, garmentDe
     },
     body: JSON.stringify({
       data: [
-        { background: `data:image/jpeg;base64,${personImageBase64}`, layers: [], composite: null },
-        `data:image/jpeg;base64,${garmentBase64}`,
+        { background: { path: personDataUri }, layers: [], composite: null },
+        { path: garmentImageUrl },
         garmentDescription || "",
         true,   // is_checked (auto-mask)
         false,  // is_checked_crop
@@ -184,7 +185,6 @@ async function generateWithIDMVTON(garmentImageUrl, personImageBase64, garmentDe
 
   console.log("[IDM-VTON] Polling for result, event:", eventId);
 
-  // Poll the event stream endpoint until it completes
   const maxWait = 120000; // free Space can be slow under load
   const interval = 3000;
   let waited = 0;
@@ -193,19 +193,17 @@ async function generateWithIDMVTON(garmentImageUrl, personImageBase64, garmentDe
     await new Promise(r => setTimeout(r, interval));
     waited += interval;
 
-    const resultRes = await fetch(`${SPACE_BASE}/gradio_api/call/tryon/${eventId}`, {
+    const resultRes = await fetch(`${SPACE_BASE}/call/tryon/${eventId}`, {
       headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {},
     });
 
     if (!resultRes.ok) continue; // not ready yet, keep polling
 
     const text = await resultRes.text();
-    // Gradio streams SSE-style lines like "event: complete\ndata: [...]"
     if (text.includes("event: complete") || text.includes('"msg":"process_completed"')) {
       const dataLineMatch = text.match(/data:\s*(\[.*\])/s);
       if (dataLineMatch) {
         const parsed = JSON.parse(dataLineMatch[1]);
-        // Output is typically [{ image: { url, path, ... } }, "status message"]
         const imageOutput = parsed[0];
         const imageUrl = imageOutput?.url || imageOutput?.path || imageOutput;
         if (imageUrl) {
