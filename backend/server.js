@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import FormData from "form-data";
 
 dotenv.config();
 
@@ -12,403 +13,256 @@ app.use(cors({
   origin: [
     "https://mirra-app.vercel.app",
     "http://localhost:5173",
+    "http://localhost:5174",
     "http://localhost:3000",
   ],
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"],
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
 }));
 
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-app.get("/", (req, res) => {
-  res.json({ status: "✦ MIRRA API is live" });
-});
-
-// ── Garment image library — confirmed free Pexels stock photos ──────────────
+// ── Garment images ─────────────────────────────────────────────────────────────
 const GARMENT_IMAGES = {
-  gala:     "https://images.pexels.com/photos/33665482/pexels-photo-33665482.jpeg?cs=srgb&fm=jpg",
-  business: "https://images.pexels.com/photos/10419116/pexels-photo-10419116.jpeg?cs=srgb&fm=jpg",
-  street:   "https://images.pexels.com/photos/17474220/pexels-photo-17474220.jpeg?cs=srgb&fm=jpg",
+  gala: "https://mirra-backend-b1c7.onrender.com/garments/gala.jpg",
+  business: "https://mirra-backend-b1c7.onrender.com/garments/business.jpg",
+  street: "https://mirra-backend-b1c7.onrender.com/garments/street.jpg",
 };
 
-// ── /api/analyze — Groq photo analysis ───────────────────────────────────────
-app.post("/api/analyze", async (req, res) => {
-  const { imageBase64 } = req.body;
-  if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
+// ── Upload a base64 image to Leffa's /upload endpoint ─────────────────────────
+async function uploadImageToLeffa(base64Data, filename = "person.jpg") {
+  const buffer = Buffer.from(base64Data, "base64");
+  const form = new FormData();
+  form.append("files", buffer, {
+    filename,
+    contentType: "image/jpeg",
+  });
 
-  const GROQ_KEY = process.env.GROQ_API_KEY;
-  if (!GROQ_KEY) return res.status(500).json({ error: "GROQ_API_KEY not set on server" });
+  const res = await fetch("https://franciszzj-leffa.hf.space/gradio_api/upload", {
+    method: "POST",
+    body: form,
+    headers: form.getHeaders(),
+  });
 
-  try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Leffa upload failed: HTTP ${res.status}: ${text}`);
+  }
+
+  const json = await res.json();
+  // Returns an array of uploaded paths, e.g. ["/tmp/gradio/abc123/person.jpg"]
+  return json[0];
+}
+
+// ── Submit Leffa virtual try-on and poll for result ───────────────────────────
+async function generateWithLeffa(personBase64, garmentUrl) {
+  console.log("[Leffa] Uploading person image...");
+  const personPath = await uploadImageToLeffa(personBase64, "person.jpg");
+  console.log("[Leffa] Person uploaded:", personPath);
+
+  // Submit the try-on job
+  console.log("[Leffa] Submitting virtual try-on job...");
+  const submitRes = await fetch(
+    "https://franciszzj-leffa.hf.space/gradio_api/call/leffa_predict_vt",
+    {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${GROQ_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "meta-llama/llama-4-scout-17b-16e-instruct",
-        temperature: 0.1,
-        max_tokens: 800,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image_url",
-                image_url: { url: `data:image/jpeg;base64,${imageBase64}` },
-              },
-              {
-                type: "text",
-                text: `You are an expert at analyzing human appearances for AI image generation. Study this person's face and body very carefully and return ONLY a valid JSON object — no markdown, no backticks, no extra text:
-{
-  "skinTone": "very precise skin tone e.g. deep ebony with cool undertones, rich dark brown with warm undertones",
-  "faceShape": "face shape e.g. oval, round, square, heart, oblong",
-  "facialFeatures": "very detailed facial features e.g. broad flat nose, full lips, strong jawline, high cheekbones, dark brown eyes, thick eyebrows",
-  "bodyBuild": "detailed body build e.g. broad shoulders, athletic build, slim waist",
-  "gender": "woman or man or boy or girl",
-  "ageRange": "approximate age e.g. 12 years old, mid 20s, early 30s",
-  "currentStyle": "one sentence about their current style",
-  "realisticVisionPrompt": "RAW photo, a [exact age] [gender], [skin tone] skin, [face shape] face, [detailed facial features], [body build], natural skin texture, skin pores visible, shot on Canon EOS R5, 85mm lens, f/1.8 aperture, soft natural window light, professional fashion portrait"
-}`,
-              },
-            ],
-          },
+        data: [
+          { path: personPath },       // person image (uploaded)
+          { path: garmentUrl },       // garment image (URL)
+          true,                       // ref_acceleration
+          50,                         // step
+          2.5,                        // scale
+          42,                         // seed
+          "viton_hd",                 // vt_model_type
+          "upper",                    // vt_garment_type
+          false,                      // vt_repaint
         ],
       }),
-    });
-
-    const data = await response.json();
-    if (data.error) return res.status(502).json({ error: `Groq: ${data.error.message}` });
-
-    const raw = data.choices?.[0]?.message?.content || "{}";
-    const clean = raw.replace(/```json|```/g, "").trim();
-
-    try {
-      return res.json(JSON.parse(clean));
-    } catch {
-      return res.status(502).json({ error: "Could not parse Groq response" });
     }
-  } catch (err) {
-    console.error("[/api/analyze]", err.message);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Prompt builders ───────────────────────────────────────────────────────────
-function buildFashionModelPrompt(personPrompt, outfitHairPrompt) {
-  return [
-    personPrompt,
-    outfitHairPrompt,
-    "hyper-realistic macro skin texture showing visible pores, natural skin imperfections, micro-hairs on skin surface, natural hydration sheen, visible capillary details near the eyes, raw unretouched skin, subsurface scattering on cheeks and lips where light passes through skin creating warm glow",
-    "subtle warm genuine engagement in the eyes, a natural smize with micro-tension in lower eyelids, slight relaxation in the brow, human natural expression with inner life and depth, not a blank stare",
-    "short lighting technique with raking side light sculpting facial structure, high contrast directional light emphasizing bone structure, distinct sharp catchlights in pupils, cinematic lens flare, deep focus luxury fashion showroom background",
-    "individual hair strands visible, realistic hair texture and volume, true-to-life 4C coil pattern definition, natural hair movement",
-    "shot on Phase One IQ4 150MP medium format camera, 85mm f/1.4 lens, shallow depth of field, high resolution macro photography, 8k uhd, professional fashion editorial photography, Vogue magazine quality, masterpiece",
-  ].join(", ");
-}
-
-function buildRealisticPrompt(prompt) {
-  return `RAW photo, ${prompt}, hyper-realistic skin texture, visible pores, subsurface scattering, realistic hair strands, true-to-life fabric drape, short lighting, catchlights in eyes, cinematic, ultra-realistic, photorealistic, 8k uhd, masterpiece`;
-}
-
-// ── Helper: poll Replicate until done ────────────────────────────────────────
-async function pollReplicate(predictionId, token, maxWait = 120000) {
-  const interval = 3000;
-  let waited = 0;
-  let prediction = { status: "starting" };
-
-  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
-    if (waited >= maxWait) throw new Error("Replicate timed out");
-    await new Promise(r => setTimeout(r, interval));
-    waited += interval;
-
-    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    prediction = await pollRes.json();
-  }
-
-  if (prediction.status === "failed") throw new Error(`Replicate failed: ${prediction.error}`);
-  return prediction.output?.[0] || prediction.output;
-}
-
-// ── PRIMARY: Leffa virtual try-on (franciszzj/Leffa HuggingFace Space) ───────
-// CVPR 2025 paper — state-of-the-art garment try-on.
-// Gradio REST API pattern:
-//   POST https://franciszzj-leffa.hf.space/call/leffa_predict_vt  -> { event_id }
-//   GET  https://franciszzj-leffa.hf.space/call/leffa_predict_vt/{event_id} -> SSE
-// File inputs sent as { "path": "<url-or-data-uri>" } per Gradio's FileData spec.
-// Runs on ZeroGPU (free shared GPU) — may queue under load.
-async function generateWithLeffa(garmentImageUrl, personImageBase64) {
-  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
-  const SPACE_BASE = "https://franciszzj-leffa.hf.space";
-
-  const personDataUri = `data:image/jpeg;base64,${personImageBase64}`;
-
-  console.log("[Leffa] Submitting virtual try-on job...");
-
-  const submitRes = await fetch(`${SPACE_BASE}/call/leffa_predict_vt`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {}),
-    },
-    body: JSON.stringify({
-      data: [
-        { path: personDataUri },   // src_image_path — person photo
-        { path: garmentImageUrl }, // ref_image_path — garment photo
-        false,                     // ref_acceleration
-        50,                        // step (inference steps)
-        2.5,                       // scale (guidance scale)
-        42,                        // seed
-        "viton_hd",                // vt_model_type
-        "upper_body",              // vt_garment_type
-        false,                     // vt_repaint
-      ],
-    }),
-  });
+  );
 
   if (!submitRes.ok) {
-    const errText = await submitRes.text();
-    throw new Error(`Leffa submit failed: HTTP ${submitRes.status}: ${errText.slice(0, 200)}`);
+    const text = await submitRes.text();
+    throw new Error(`Leffa submit failed: HTTP ${submitRes.status}: ${text}`);
   }
 
-  const submitData = await submitRes.json();
-  const eventId = submitData.event_id;
-  if (!eventId) throw new Error("Leffa: no event_id returned");
+  const { event_id } = await submitRes.json();
+  console.log("[Leffa] Polling for result, event:", event_id);
 
-  console.log("[Leffa] Polling for result, event:", eventId);
+  // Poll the SSE stream
+  const pollRes = await fetch(
+    `https://franciszzj-leffa.hf.space/gradio_api/call/leffa_predict_vt/${event_id}`
+  );
 
-  const maxWait = 180000; // ZeroGPU can queue for a while
-  const interval = 4000;
-  let waited = 0;
-
-  while (waited < maxWait) {
-    await new Promise(r => setTimeout(r, interval));
-    waited += interval;
-
-    const resultRes = await fetch(`${SPACE_BASE}/call/leffa_predict_vt/${eventId}`, {
-      headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {},
-    });
-
-    if (!resultRes.ok) continue;
-
-    const text = await resultRes.text();
-
-    if (text.includes("event: error") || text.includes('"msg":"process_completed_error"')) {
-      throw new Error(`Leffa processing error: ${text.slice(0, 200)}`);
-    }
-
-    if (text.includes("event: complete") || text.includes('"msg":"process_completed"')) {
-      const dataLineMatch = text.match(/data:\s*(\[.*\])/s);
-      if (dataLineMatch) {
-        const parsed = JSON.parse(dataLineMatch[1]);
-        // Leffa returns [result_image, seed] — result_image is first
-        const imageOutput = parsed[0];
-        const imageUrl = imageOutput?.url || imageOutput?.path || imageOutput;
-        if (imageUrl) {
-          console.log("[Leffa] Result ready!");
-          const fullUrl = imageUrl.startsWith("http") ? imageUrl : `${SPACE_BASE}/file=${imageUrl}`;
-          const imgRes = await fetch(fullUrl, {
-            headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {},
-          });
-          const buffer = await imgRes.arrayBuffer();
-          const base64 = Buffer.from(buffer).toString("base64");
-          return `data:image/jpeg;base64,${base64}`;
-        }
-      }
-      throw new Error("Leffa: completed but no image found in response");
-    }
-
-    // still queued/processing — keep polling
+  if (!pollRes.ok) {
+    throw new Error(`Leffa poll failed: HTTP ${pollRes.status}`);
   }
 
-  throw new Error("Leffa timed out — ZeroGPU may be overloaded");
+  // Read SSE stream until complete or error
+  const text = await pollRes.text();
+  const lines = text.split("\n");
+
+  let lastEvent = null;
+  let lastData = null;
+
+  for (const line of lines) {
+    if (line.startsWith("event:")) lastEvent = line.replace("event:", "").trim();
+    if (line.startsWith("data:")) lastData = line.replace("data:", "").trim();
+  }
+
+  if (lastEvent === "error") {
+    throw new Error(`Leffa processing error: ${lastData}`);
+  }
+
+  if (lastEvent !== "complete" || !lastData || lastData === "null") {
+    throw new Error(`Leffa did not complete. Last event: ${lastEvent}`);
+  }
+
+  const result = JSON.parse(lastData);
+  // result[0] is the output image FileData
+  const outputFile = result[0];
+
+  // The URL field gives us the full accessible URL
+  if (outputFile && outputFile.url) {
+    // Rewrite to correct gradio_api path if needed
+    const rawUrl = outputFile.url;
+    const correctedUrl = rawUrl.replace(
+      /\/call\/leffa\/file=/,
+      "/gradio_api/file="
+    ).replace(
+      /\/file=/,
+      "/gradio_api/file="
+    );
+    console.log("[Leffa] Result URL:", correctedUrl);
+
+    // Fetch the image and return as base64
+    const imgRes = await fetch(correctedUrl);
+    if (!imgRes.ok) throw new Error(`Leffa image fetch failed: ${imgRes.status}`);
+    const imgBuffer = await imgRes.buffer();
+    return `data:image/webp;base64,${imgBuffer.toString("base64")}`;
+  }
+
+  throw new Error("Leffa returned no output URL");
 }
 
-// ── FALLBACK 1: Replicate two-step — FLUX fashion model + faceswap ───────────
-async function generateFashionModel(prompt, personData) {
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
-
-  const gender = personData?.gender || "person";
-  const skinTone = personData?.skinTone || "deep dark brown skin";
-  const bodyBuild = personData?.bodyBuild || "athletic build";
-  const ageRange = personData?.ageRange || "";
-
-  const personPrompt = `a ${ageRange} ${gender}, ${skinTone} skin, ${bodyBuild}`;
-  const fashionPrompt = buildFashionModelPrompt(personPrompt, prompt);
+// ── Replicate two-step fallback ───────────────────────────────────────────────
+async function generateWithReplicate(prompt, personBase64) {
+  const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN;
+  if (!REPLICATE_API_TOKEN) throw new Error("No Replicate token");
 
   console.log("[Step 1] Generating fashion model with FLUX...");
-
-  const startRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions", {
+  const fluxRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-1.1-pro/predictions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${REPLICATE_TOKEN}`,
+      Authorization: `Bearer ${REPLICATE_API_TOKEN}`,
       "Content-Type": "application/json",
-      "Prefer": "wait=60",
+      Prefer: "wait",
+    },
+    body: JSON.stringify({ input: { prompt, aspect_ratio: "2:3", output_format: "webp" } }),
+  });
+
+  const fluxData = await fluxRes.json();
+  if (!fluxRes.ok) throw new Error(`FLUX start failed: ${JSON.stringify(fluxData)}`);
+
+  const fluxImageUrl = Array.isArray(fluxData.output) ? fluxData.output[0] : fluxData.output;
+  if (!fluxImageUrl) throw new Error("FLUX returned no image");
+
+  console.log("[Step 2] Running FaceSwap...");
+  const swapRes = await fetch("https://api.replicate.com/v1/models/yan-ops/face-swap/predictions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${REPLICATE_API_TOKEN}`,
+      "Content-Type": "application/json",
+      Prefer: "wait",
     },
     body: JSON.stringify({
       input: {
-        prompt: fashionPrompt,
-        num_inference_steps: 35,
-        guidance_scale: 4.0,
-        width: 768,
-        height: 1024,
-        output_format: "jpg",
-        output_quality: 97,
+        target_image: fluxImageUrl,
+        swap_image: `data:image/jpeg;base64,${personBase64}`,
+        target_face_index: 0,
+        swap_face_index: 0,
       },
     }),
   });
 
-  if (!startRes.ok) {
-    const err = await startRes.text();
-    throw new Error(`FLUX start failed: ${err.slice(0, 200)}`);
-  }
+  const swapData = await swapRes.json();
+  if (!swapRes.ok) throw new Error(`FaceSwap failed: ${JSON.stringify(swapData)}`);
 
-  const prediction = await startRes.json();
-  if (prediction.status === "succeeded") return prediction.output?.[0] || prediction.output;
-  return await pollReplicate(prediction.id, REPLICATE_TOKEN);
+  return Array.isArray(swapData.output) ? swapData.output[0] : swapData.output;
 }
 
-async function swapFace(sourceImageBase64, targetImageUrl) {
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
+// ── HuggingFace FLUX fallback ─────────────────────────────────────────────────
+async function generateWithHuggingFace(prompt) {
+  const HF_API_KEY = process.env.HUGGINGFACE_API_KEY;
+  if (!HF_API_KEY) throw new Error("No HuggingFace API key");
 
-  console.log("[Step 2] Swapping face onto fashion model...");
-
-  const models = [
+  const response = await fetch(
+    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
     {
-      url: "https://api.replicate.com/v1/models/cdingram/face-swap/predictions",
-      input: {
-        target_image: targetImageUrl,
-        source_image: `data:image/jpeg;base64,${sourceImageBase64}`,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${HF_API_KEY}`,
+        "Content-Type": "application/json",
       },
-    },
-    {
-      url: "https://api.replicate.com/v1/models/lucataco/faceswap/predictions",
-      input: {
-        target_image: targetImageUrl,
-        swap_image: `data:image/jpeg;base64,${sourceImageBase64}`,
-      },
-    },
-  ];
-
-  for (const model of models) {
-    try {
-      const startRes = await fetch(model.url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${REPLICATE_TOKEN}`,
-          "Content-Type": "application/json",
-          "Prefer": "wait=60",
-        },
-        body: JSON.stringify({ input: model.input }),
-      });
-
-      if (!startRes.ok) {
-        const err = await startRes.text();
-        console.log(`[Step 2] Model failed: ${err.slice(0, 100)}, trying next...`);
-        continue;
-      }
-
-      const prediction = await startRes.json();
-      let outputUrl;
-
-      if (prediction.status === "succeeded") {
-        outputUrl = prediction.output?.[0] || prediction.output;
-      } else {
-        outputUrl = await pollReplicate(prediction.id, REPLICATE_TOKEN);
-      }
-
-      if (outputUrl) {
-        console.log("[Step 2] Face swap succeeded!");
-        return outputUrl;
-      }
-    } catch (err) {
-      console.log(`[Step 2] Error: ${err.message}, trying next...`);
-      continue;
+      body: JSON.stringify({ inputs: prompt }),
     }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`HuggingFace ${response.status}: ${errorText}`);
   }
 
-  throw new Error("All face swap models failed");
+  const buffer = await response.buffer();
+  return `data:image/jpeg;base64,${buffer.toString("base64")}`;
 }
 
-// ── /api/generate — Leffa → Replicate two-step → HuggingFace ─────────────────
+// ── Main generate route ───────────────────────────────────────────────────────
 app.post("/api/generate", async (req, res) => {
-  const { prompt, imageBase64, personData, outfitId } = req.body;
-  if (!prompt) return res.status(400).json({ error: "prompt required" });
+  const { prompt, imageBase64, outfitId } = req.body;
 
   console.log("[/api/generate] prompt length:", prompt?.length);
   console.log("[/api/generate] imageBase64 present:", !!imageBase64);
   console.log("[/api/generate] outfitId:", outfitId);
-  console.log("[/api/generate] garment image available:", !!GARMENT_IMAGES[outfitId]);
 
-  // ── PRIMARY: Leffa — only if this outfit has a garment image ─────────────
-  if (imageBase64 && outfitId && GARMENT_IMAGES[outfitId]) {
+  const garmentUrl = GARMENT_IMAGES[outfitId];
+  console.log("[/api/generate] garment image available:", !!garmentUrl);
+
+  // 1. Try Leffa
+  if (imageBase64 && garmentUrl) {
     try {
-      const image = await generateWithLeffa(GARMENT_IMAGES[outfitId], imageBase64);
-      console.log("[/api/generate] Leffa succeeded!");
-      return res.json({ image, source: "leffa" });
+      const result = await generateWithLeffa(imageBase64, garmentUrl);
+      return res.json({ imageUrl: result, method: "leffa" });
     } catch (err) {
-      console.error("[/api/generate] Leffa failed:", err.message);
+      console.log("[/api/generate] Leffa failed:", err.message);
     }
   }
 
-  // ── FALLBACK 1: Replicate two-step (FLUX + FaceSwap) ─────────────────────
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
-  if (REPLICATE_TOKEN && imageBase64) {
-    try {
-      const fashionModelUrl = await generateFashionModel(prompt, personData);
-      console.log("[Step 1] Fashion model generated:", fashionModelUrl);
-
-      const finalImageUrl = await swapFace(imageBase64, fashionModelUrl);
-      console.log("[Step 2] Face swap complete");
-
-      const imgRes = await fetch(finalImageUrl);
-      const buffer = await imgRes.arrayBuffer();
-      const base64 = Buffer.from(buffer).toString("base64");
-      return res.json({ image: `data:image/jpeg;base64,${base64}`, source: "faceswap" });
-
-    } catch (err) {
-      console.error("[/api/generate] Two-step failed:", err.message);
-    }
-  }
-
-  // ── FALLBACK 2: HuggingFace FLUX.1-schnell (text-only) ───────────────────
+  // 2. Try Replicate two-step
   try {
-    console.log("[/api/generate] Using HuggingFace fallback...");
-    const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
-    if (!HF_TOKEN) throw new Error("HUGGINGFACE_TOKEN not set");
-
-    const enrichedPrompt = buildRealisticPrompt(prompt);
-    const response = await fetch(
-      "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${HF_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          inputs: enrichedPrompt,
-          parameters: { num_inference_steps: 8, width: 768, height: 1024, guidance_scale: 0 },
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`HuggingFace ${response.status}: ${errText.slice(0, 200)}`);
-    }
-
-    const buffer = await response.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString("base64");
-    return res.json({ image: `data:image/jpeg;base64,${base64}`, source: "huggingface" });
-
+    const result = await generateWithReplicate(prompt, imageBase64);
+    return res.json({ imageUrl: result, method: "replicate" });
   } catch (err) {
-    console.error("[/api/generate] All methods failed:", err.message);
-    return res.status(500).json({ error: err.message });
+    console.log("[/api/generate] Two-step failed:", err.message);
+  }
+
+  // 3. Try HuggingFace FLUX
+  console.log("[/api/generate] Using HuggingFace fallback...");
+  try {
+    const result = await generateWithHuggingFace(prompt);
+    return res.json({ imageUrl: result, method: "huggingface" });
+  } catch (err) {
+    console.log("[/api/generate] All methods failed:", err.message);
+    return res.status(500).json({ error: "All generation methods failed", details: err.message });
   }
 });
 
-app.listen(PORT, () => console.log(`✦ MIRRA API running on port ${PORT}`));
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+
+app.listen(PORT, () => {
+  console.log(`✦ MIRRA API running on port ${PORT}`);
+});
