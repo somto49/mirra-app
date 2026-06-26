@@ -56,11 +56,43 @@ async function uploadImageToLeffa(base64Data, filename = "person.jpg") {
   return json[0];
 }
 
+// ── Upload a garment from URL to Leffa ────────────────────────────────────────
+async function uploadGarmentToLeffa(garmentUrl) {
+  console.log("[Leffa] Fetching garment from:", garmentUrl);
+  const imgRes = await fetch(garmentUrl);
+  if (!imgRes.ok) throw new Error(`Failed to fetch garment: ${imgRes.status}`);
+  const buffer = await imgRes.buffer();
+
+  const form = new FormData();
+  form.append("files", buffer, {
+    filename: "garment.jpg",
+    contentType: "image/jpeg",
+  });
+
+  const uploadRes = await fetch("https://franciszzj-leffa.hf.space/gradio_api/upload", {
+    method: "POST",
+    body: form,
+    headers: form.getHeaders(),
+  });
+
+  if (!uploadRes.ok) {
+    const text = await uploadRes.text();
+    throw new Error(`Leffa garment upload failed: HTTP ${uploadRes.status}: ${text}`);
+  }
+
+  const json = await uploadRes.json();
+  console.log("[Leffa] Garment uploaded:", json[0]);
+  return json[0];
+}
+
 // ── Submit Leffa virtual try-on and poll for result ───────────────────────────
 async function generateWithLeffa(personBase64, garmentUrl) {
   console.log("[Leffa] Uploading person image...");
   const personPath = await uploadImageToLeffa(personBase64, "person.jpg");
   console.log("[Leffa] Person uploaded:", personPath);
+
+  console.log("[Leffa] Uploading garment image...");
+  const garmentPath = await uploadGarmentToLeffa(garmentUrl);
 
   // Submit the try-on job
   console.log("[Leffa] Submitting virtual try-on job...");
@@ -72,7 +104,7 @@ async function generateWithLeffa(personBase64, garmentUrl) {
       body: JSON.stringify({
         data: [
           { path: personPath },       // person image (uploaded)
-          { path: garmentUrl },       // garment image (URL)
+          { path: garmentPath },      // garment image (uploaded)
           true,                       // ref_acceleration
           50,                         // step
           2.5,                        // scale
