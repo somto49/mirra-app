@@ -25,13 +25,10 @@ app.get("/", (req, res) => {
 });
 
 // ── Garment image library — confirmed free Pexels stock photos ──────────────
-// TEST SET: only these 3 outfits are wired to real garment images right now.
-// Remaining outfits will fall through to the prompt-only pipeline until more
-// garment images are sourced.
 const GARMENT_IMAGES = {
-  gala: "https://images.pexels.com/photos/33665482/pexels-photo-33665482.jpeg?cs=srgb&fm=jpg",
+  gala:     "https://images.pexels.com/photos/33665482/pexels-photo-33665482.jpeg?cs=srgb&fm=jpg",
   business: "https://images.pexels.com/photos/10419116/pexels-photo-10419116.jpeg?cs=srgb&fm=jpg",
-  street: "https://images.pexels.com/photos/17474220/pexels-photo-17474220.jpeg?cs=srgb&fm=jpg",
+  street:   "https://images.pexels.com/photos/17474220/pexels-photo-17474220.jpeg?cs=srgb&fm=jpg",
 };
 
 // ── /api/analyze — Groq photo analysis ───────────────────────────────────────
@@ -99,7 +96,6 @@ app.post("/api/analyze", async (req, res) => {
 });
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
-
 function buildFashionModelPrompt(personPrompt, outfitHairPrompt) {
   return [
     personPrompt,
@@ -137,25 +133,22 @@ async function pollReplicate(predictionId, token, maxWait = 120000) {
   return prediction.output?.[0] || prediction.output;
 }
 
-// ── PRIMARY: free IDM-VTON HuggingFace Space (yisol/IDM-VTON) ────────────────
-// Calls the Gradio REST API directly (submit -> poll) since this is Node, not
-// Python, so the official gradio_client library can't be used.
-// Confirmed endpoint pattern (Gradio's own curl docs):
-//   POST {space}/call/{api_name}          -> { event_id }
-//   GET  {space}/call/{api_name}/{event_id} -> SSE stream, "event: complete"
-// File-type inputs are passed as { "path": "<url-or-data-uri>" }, not raw
-// base64 strings.
-// This is a FREE shared-GPU community Space — it can be slow, queued, or
-// occasionally down since nobody is paying to keep it always-on.
-async function generateWithIDMVTON(garmentImageUrl, personImageBase64, garmentDescription) {
-  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN; // optional but helps with rate limits
-  const SPACE_BASE = "https://yisol-idm-vton.hf.space";
+// ── PRIMARY: Leffa virtual try-on (franciszzj/Leffa HuggingFace Space) ───────
+// CVPR 2025 paper — state-of-the-art garment try-on.
+// Gradio REST API pattern:
+//   POST https://franciszzj-leffa.hf.space/call/leffa_predict_vt  -> { event_id }
+//   GET  https://franciszzj-leffa.hf.space/call/leffa_predict_vt/{event_id} -> SSE
+// File inputs sent as { "path": "<url-or-data-uri>" } per Gradio's FileData spec.
+// Runs on ZeroGPU (free shared GPU) — may queue under load.
+async function generateWithLeffa(garmentImageUrl, personImageBase64) {
+  const HF_TOKEN = process.env.HUGGINGFACE_TOKEN;
+  const SPACE_BASE = "https://franciszzj-leffa.hf.space";
 
   const personDataUri = `data:image/jpeg;base64,${personImageBase64}`;
 
-  console.log("[IDM-VTON] Submitting tryon job...");
+  console.log("[Leffa] Submitting virtual try-on job...");
 
-  const submitRes = await fetch(`${SPACE_BASE}/call/tryon`, {
+  const submitRes = await fetch(`${SPACE_BASE}/call/leffa_predict_vt`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -163,68 +156,75 @@ async function generateWithIDMVTON(garmentImageUrl, personImageBase64, garmentDe
     },
     body: JSON.stringify({
       data: [
-        { background: { path: personDataUri }, layers: [], composite: null },
-        { path: garmentImageUrl },
-        garmentDescription || "",
-        true,   // is_checked (auto-mask)
-        false,  // is_checked_crop
-        30,     // denoise_steps
-        42,     // seed
+        { path: personDataUri },   // src_image_path — person photo
+        { path: garmentImageUrl }, // ref_image_path — garment photo
+        false,                     // ref_acceleration
+        50,                        // step (inference steps)
+        2.5,                       // scale (guidance scale)
+        42,                        // seed
+        "viton_hd",                // vt_model_type
+        "upper_body",              // vt_garment_type
+        false,                     // vt_repaint
       ],
     }),
   });
 
   if (!submitRes.ok) {
     const errText = await submitRes.text();
-    throw new Error(`IDM-VTON submit failed: HTTP ${submitRes.status}: ${errText.slice(0, 200)}`);
+    throw new Error(`Leffa submit failed: HTTP ${submitRes.status}: ${errText.slice(0, 200)}`);
   }
 
   const submitData = await submitRes.json();
   const eventId = submitData.event_id;
-  if (!eventId) throw new Error("IDM-VTON: no event_id returned");
+  if (!eventId) throw new Error("Leffa: no event_id returned");
 
-  console.log("[IDM-VTON] Polling for result, event:", eventId);
+  console.log("[Leffa] Polling for result, event:", eventId);
 
-  const maxWait = 120000; // free Space can be slow under load
-  const interval = 3000;
+  const maxWait = 180000; // ZeroGPU can queue for a while
+  const interval = 4000;
   let waited = 0;
 
   while (waited < maxWait) {
     await new Promise(r => setTimeout(r, interval));
     waited += interval;
 
-    const resultRes = await fetch(`${SPACE_BASE}/call/tryon/${eventId}`, {
+    const resultRes = await fetch(`${SPACE_BASE}/call/leffa_predict_vt/${eventId}`, {
       headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {},
     });
 
-    if (!resultRes.ok) continue; // not ready yet, keep polling
+    if (!resultRes.ok) continue;
 
     const text = await resultRes.text();
+
+    if (text.includes("event: error") || text.includes('"msg":"process_completed_error"')) {
+      throw new Error(`Leffa processing error: ${text.slice(0, 200)}`);
+    }
+
     if (text.includes("event: complete") || text.includes('"msg":"process_completed"')) {
       const dataLineMatch = text.match(/data:\s*(\[.*\])/s);
       if (dataLineMatch) {
         const parsed = JSON.parse(dataLineMatch[1]);
+        // Leffa returns [result_image, seed] — result_image is first
         const imageOutput = parsed[0];
         const imageUrl = imageOutput?.url || imageOutput?.path || imageOutput;
         if (imageUrl) {
-          console.log("[IDM-VTON] Result ready!");
+          console.log("[Leffa] Result ready!");
           const fullUrl = imageUrl.startsWith("http") ? imageUrl : `${SPACE_BASE}/file=${imageUrl}`;
-          const imgRes = await fetch(fullUrl, { headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {} });
+          const imgRes = await fetch(fullUrl, {
+            headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {},
+          });
           const buffer = await imgRes.arrayBuffer();
           const base64 = Buffer.from(buffer).toString("base64");
           return `data:image/jpeg;base64,${base64}`;
         }
       }
-      throw new Error("IDM-VTON: completed but no image found in response");
+      throw new Error("Leffa: completed but no image found in response");
     }
 
-    if (text.includes("event: error") || text.includes('"msg":"process_completed_error"')) {
-      throw new Error(`IDM-VTON processing error: ${text.slice(0, 200)}`);
-    }
-    // otherwise: still queued/processing, keep polling
+    // still queued/processing — keep polling
   }
 
-  throw new Error("IDM-VTON timed out — free Space may be overloaded or queued");
+  throw new Error("Leffa timed out — ZeroGPU may be overloaded");
 }
 
 // ── FALLBACK 1: Replicate two-step — FLUX fashion model + faceswap ───────────
@@ -333,7 +333,7 @@ async function swapFace(sourceImageBase64, targetImageUrl) {
   throw new Error("All face swap models failed");
 }
 
-// ── /api/generate — IDM-VTON (free) → Replicate two-step → HuggingFace ───────
+// ── /api/generate — Leffa → Replicate two-step → HuggingFace ─────────────────
 app.post("/api/generate", async (req, res) => {
   const { prompt, imageBase64, personData, outfitId } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
@@ -343,18 +343,18 @@ app.post("/api/generate", async (req, res) => {
   console.log("[/api/generate] outfitId:", outfitId);
   console.log("[/api/generate] garment image available:", !!GARMENT_IMAGES[outfitId]);
 
-  // ── PRIMARY: IDM-VTON free Space — only if this outfit has a garment image ─
+  // ── PRIMARY: Leffa — only if this outfit has a garment image ─────────────
   if (imageBase64 && outfitId && GARMENT_IMAGES[outfitId]) {
     try {
-      const image = await generateWithIDMVTON(GARMENT_IMAGES[outfitId], imageBase64, prompt);
-      console.log("[/api/generate] IDM-VTON succeeded!");
-      return res.json({ image, source: "idm-vton" });
+      const image = await generateWithLeffa(GARMENT_IMAGES[outfitId], imageBase64);
+      console.log("[/api/generate] Leffa succeeded!");
+      return res.json({ image, source: "leffa" });
     } catch (err) {
-      console.error("[/api/generate] IDM-VTON failed:", err.message);
+      console.error("[/api/generate] Leffa failed:", err.message);
     }
   }
 
-  // ── FALLBACK 1: Replicate two-step (FLUX + FaceSwap) ────────────────────
+  // ── FALLBACK 1: Replicate two-step (FLUX + FaceSwap) ─────────────────────
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
   if (REPLICATE_TOKEN && imageBase64) {
     try {
@@ -391,8 +391,8 @@ app.post("/api/generate", async (req, res) => {
         },
         body: JSON.stringify({
           inputs: enrichedPrompt,
-          parameters: { num_inference_steps: 8, width: 768, height: 1024, guidance_scale: 0 }
-        })
+          parameters: { num_inference_steps: 8, width: 768, height: 1024, guidance_scale: 0 },
+        }),
       }
     );
 
