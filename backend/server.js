@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
 import FormData from "form-data";
+import { GARMENT_IMAGES, GARMENT_TYPES } from "./garments.js";
 
 dotenv.config();
 
@@ -23,13 +24,6 @@ app.use(cors({
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
-
-// ── Garment images ─────────────────────────────────────────────────────────────
-const GARMENT_IMAGES = {
-  gala: "https://mirra-backend-b1c7.onrender.com/garments/gala.jpg",
-  business: "https://mirra-backend-b1c7.onrender.com/garments/business.jpg",
-  street: "https://mirra-backend-b1c7.onrender.com/garments/street.jpg",
-};
 
 // ── Upload a base64 image to Leffa's /upload endpoint ─────────────────────────
 async function uploadImageToLeffa(base64Data, filename = "person.jpg") {
@@ -52,7 +46,6 @@ async function uploadImageToLeffa(base64Data, filename = "person.jpg") {
   }
 
   const json = await res.json();
-  // Returns an array of uploaded paths, e.g. ["/tmp/gradio/abc123/person.jpg"]
   return json[0];
 }
 
@@ -86,7 +79,8 @@ async function uploadGarmentToLeffa(garmentUrl) {
 }
 
 // ── Submit Leffa virtual try-on and poll for result ───────────────────────────
-async function generateWithLeffa(personBase64, garmentUrl) {
+// garmentType must be one of: "upper_body" | "lower_body" | "dresses"
+async function generateWithLeffa(personBase64, garmentUrl, garmentType) {
   console.log("[Leffa] Uploading person image...");
   const personPath = await uploadImageToLeffa(personBase64, "person.jpg");
   console.log("[Leffa] Person uploaded:", personPath);
@@ -94,8 +88,7 @@ async function generateWithLeffa(personBase64, garmentUrl) {
   console.log("[Leffa] Uploading garment image...");
   const garmentPath = await uploadGarmentToLeffa(garmentUrl);
 
-  // Submit the try-on job
-  console.log("[Leffa] Submitting virtual try-on job...");
+  console.log("[Leffa] Submitting virtual try-on job, type:", garmentType);
   const submitRes = await fetch(
     "https://franciszzj-leffa.hf.space/gradio_api/call/leffa_predict_vt",
     {
@@ -103,15 +96,15 @@ async function generateWithLeffa(personBase64, garmentUrl) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         data: [
-          { path: personPath },       // person image (uploaded)
-          { path: garmentPath },      // garment image (uploaded)
-          true,                       // ref_acceleration
-          50,                         // step
-          2.5,                        // scale
-          42,                         // seed
-          "viton_hd",                 // vt_model_type
-          "upper",                    // vt_garment_type
-          false,                      // vt_repaint
+          { path: personPath },        // person image (uploaded)
+          { path: garmentPath },       // garment image (uploaded)
+          true,                        // ref_acceleration
+          50,                          // step
+          2.5,                         // scale
+          42,                          // seed
+          "viton_hd",                  // vt_model_type
+          garmentType || "upper_body", // vt_garment_type — was hardcoded "upper" (invalid)
+          false,                       // vt_repaint
         ],
       }),
     }
@@ -125,7 +118,6 @@ async function generateWithLeffa(personBase64, garmentUrl) {
   const { event_id } = await submitRes.json();
   console.log("[Leffa] Polling for result, event:", event_id);
 
-  // Poll the SSE stream
   const pollRes = await fetch(
     `https://franciszzj-leffa.hf.space/gradio_api/call/leffa_predict_vt/${event_id}`
   );
@@ -134,7 +126,6 @@ async function generateWithLeffa(personBase64, garmentUrl) {
     throw new Error(`Leffa poll failed: HTTP ${pollRes.status}`);
   }
 
-  // Read SSE stream until complete or error
   const text = await pollRes.text();
   const lines = text.split("\n");
 
@@ -155,12 +146,9 @@ async function generateWithLeffa(personBase64, garmentUrl) {
   }
 
   const result = JSON.parse(lastData);
-  // result[0] is the output image FileData
   const outputFile = result[0];
 
-  // The URL field gives us the full accessible URL
   if (outputFile && outputFile.url) {
-    // Rewrite to correct gradio_api path if needed
     const rawUrl = outputFile.url;
     const correctedUrl = rawUrl.replace(
       /\/call\/leffa\/file=/,
@@ -171,7 +159,6 @@ async function generateWithLeffa(personBase64, garmentUrl) {
     );
     console.log("[Leffa] Result URL:", correctedUrl);
 
-    // Fetch the image and return as base64
     const imgRes = await fetch(correctedUrl);
     if (!imgRes.ok) throw new Error(`Leffa image fetch failed: ${imgRes.status}`);
     const imgBuffer = await imgRes.buffer();
@@ -262,19 +249,22 @@ app.post("/api/generate", async (req, res) => {
   console.log("[/api/generate] outfitId:", outfitId);
 
   const garmentUrl = GARMENT_IMAGES[outfitId];
-  console.log("[/api/generate] garment image available:", !!garmentUrl);
+  const garmentType = GARMENT_TYPES[outfitId] || "upper_body";
+  console.log("[/api/generate] garment image available:", !!garmentUrl, "| type:", garmentType);
 
-  // 1. Try Leffa
+  // 1. Try Leffa (real try-on, preserves face/body/hair)
   if (imageBase64 && garmentUrl) {
     try {
-      const result = await generateWithLeffa(imageBase64, garmentUrl);
+      const result = await generateWithLeffa(imageBase64, garmentUrl, garmentType);
       return res.json({ imageUrl: result, method: "leffa" });
     } catch (err) {
       console.log("[/api/generate] Leffa failed:", err.message);
     }
+  } else {
+    console.log("[/api/generate] Skipping Leffa: missing garment image for outfitId:", outfitId);
   }
 
-  // 2. Try Replicate two-step
+  // 2. Try Replicate two-step fallback
   try {
     const result = await generateWithReplicate(prompt, imageBase64);
     return res.json({ imageUrl: result, method: "replicate" });
@@ -282,7 +272,7 @@ app.post("/api/generate", async (req, res) => {
     console.log("[/api/generate] Two-step failed:", err.message);
   }
 
-  // 3. Try HuggingFace FLUX
+  // 3. Try HuggingFace FLUX (text-to-image only, no real try-on)
   console.log("[/api/generate] Using HuggingFace fallback...");
   try {
     const result = await generateWithHuggingFace(prompt);
